@@ -167,7 +167,7 @@ Every `run_script` call writes two files to `.mcp/scripts/`:
 
 ```json
 {
-  "decision": "hard_block" | "elicit_denied" | "warn" | "ok",
+  "decision": "hard_block" | "elicit_denied" | "elicit_accepted" | "warn" | "ok",
   "tier": 1,
   "strict_mode": false,
   "promoted_by_strict": false,
@@ -182,6 +182,14 @@ Every `run_script` call writes two files to `.mcp/scripts/`:
   "timestamp": "2026-05-27T..."
 }
 ```
+
+`decision` values map to handler outcomes:
+
+- `hard_block` — Tier 1 finding; script refused before reaching the bridge.
+- `elicit_denied` — Tier 2 finding; user declined the elicitation OR the client does not support elicitation.
+- `elicit_accepted` — Tier 2 finding; user accepted the elicitation. Script executed.
+- `warn` — Tier 3 finding only (no Tier 1 or Tier 2). Script executed; warnings surfaced in the response.
+- `ok` — No findings. Script executed unconditionally.
 
 Audit failure (disk full, permission denied) is logged via `logDebug` and never blocks the call.
 

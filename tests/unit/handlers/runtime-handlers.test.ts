@@ -36,30 +36,34 @@ import type {
 } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
-import { createNullContext, type McpContext } from '../../../src/utils/mcp-context.js';
+import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
 
 // ---------------------------------------------------------------------------
 // MCP context fakes
 // ---------------------------------------------------------------------------
 
 /**
- * Build a context that auto-accepts the run_project session gate AND any
- * Tier 2 run_script elicitations. Tests that exercise the gate explicitly
- * should construct their own context.
+ * Build a test context with the given elicitor behavior. Defaults to
+ * `() => ({ action: 'accept', content: { confirm: true } })`, which auto-accepts
+ * both the run_project session gate and any Tier 2 run_script elicitation.
  */
-function acceptingContext(opts: { strict?: boolean } = {}): McpContext {
+function makeContext(opts: { elicit?: Elicitor; strict?: boolean } = {}): McpContext {
+  const defaultElicit: Elicitor = async () => ({
+    action: 'accept',
+    content: { confirm: true },
+  });
   return {
-    elicitor: {
-      async elicit() {
-        return { action: 'accept', content: { confirm: true } };
-      },
-    },
+    elicitor: opts.elicit ?? defaultElicit,
     strictMode: opts.strict === true,
     sessionState: { runProjectConfirmed: new Set<string>() },
   };
 }
 
-void createNullContext; // kept available for tests that want a decline-by-default context
+const acceptingContext = makeContext;
+const declineElicitor: Elicitor = async () => ({ action: 'decline' });
+const throwingElicitor: Elicitor = async () => {
+  throw new Error('Method not found');
+};
 
 // ---------------------------------------------------------------------------
 // Runtime fake runner
@@ -940,16 +944,7 @@ describe('handleRunScript security policy', () => {
   it('elicits on Tier 2 HTTPRequest and proceeds on accept', async () => {
     const dir = tmp.makeProject('run-script-tier2-accept-');
     const fake = activeFake(dir);
-    const ctx: McpContext = {
-      elicitor: {
-        async elicit() {
-          return { action: 'accept', content: { confirm: true } };
-        },
-      },
-      strictMode: false,
-      sessionState: { runProjectConfirmed: new Set() },
-    };
-    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, makeContext());
     expect(hasError(result)).toBe(false);
     expect(fake.bridgeCalls).toHaveLength(1);
     const parsed = JSON.parse(unwrap(result).content[0].text);
@@ -959,16 +954,11 @@ describe('handleRunScript security policy', () => {
   it('rejects Tier 2 on decline without reaching the bridge', async () => {
     const dir = tmp.makeProject('run-script-tier2-decline-');
     const fake = activeFake(dir);
-    const ctx: McpContext = {
-      elicitor: {
-        async elicit() {
-          return { action: 'decline' };
-        },
-      },
-      strictMode: false,
-      sessionState: { runProjectConfirmed: new Set() },
-    };
-    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: declineElicitor }),
+    );
     expectErrorMatching(result, /User declined.*HTTPRequest/);
     expect(fake.bridgeCalls).toHaveLength(0);
   });
@@ -976,16 +966,11 @@ describe('handleRunScript security policy', () => {
   it('falls back to denial when elicitation throws (older client)', async () => {
     const dir = tmp.makeProject('run-script-tier2-noclient-');
     const fake = activeFake(dir);
-    const ctx: McpContext = {
-      elicitor: {
-        async elicit() {
-          throw new Error('Method not found');
-        },
-      },
-      strictMode: false,
-      sessionState: { runProjectConfirmed: new Set() },
-    };
-    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: throwingElicitor }),
+    );
     expectErrorMatching(result, /Elicitation unavailable/);
     expect(fake.bridgeCalls).toHaveLength(0);
   });
@@ -994,17 +979,15 @@ describe('handleRunScript security policy', () => {
     const dir = tmp.makeProject('run-script-strict-');
     const fake = activeFake(dir);
     let elicitCalled = false;
-    const ctx: McpContext = {
-      elicitor: {
-        async elicit() {
-          elicitCalled = true;
-          return { action: 'accept' };
-        },
-      },
-      strictMode: true,
-      sessionState: { runProjectConfirmed: new Set() },
+    const trackedAccept: Elicitor = async () => {
+      elicitCalled = true;
+      return { action: 'accept' };
     };
-    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: trackedAccept, strict: true }),
+    );
     expectErrorMatching(result, /Blocked.*HTTPRequest/);
     expect(elicitCalled).toBe(false);
     expect(fake.bridgeCalls).toHaveLength(0);
@@ -1119,16 +1102,11 @@ describe('handleRunProject security pre-flight', () => {
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(true);
     let elicitCount = 0;
-    const ctx: McpContext = {
-      elicitor: {
-        async elicit() {
-          elicitCount++;
-          return { action: 'accept', content: { confirm: true } };
-        },
-      },
-      strictMode: false,
-      sessionState: { runProjectConfirmed: new Set() },
+    const counting: Elicitor = async () => {
+      elicitCount++;
+      return { action: 'accept', content: { confirm: true } };
     };
+    const ctx = makeContext({ elicit: counting });
     await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
     await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
     await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
@@ -1140,16 +1118,11 @@ describe('handleRunProject security pre-flight', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(true);
-    const ctx: McpContext = {
-      elicitor: {
-        async elicit() {
-          return { action: 'decline' };
-        },
-      },
-      strictMode: false,
-      sessionState: { runProjectConfirmed: new Set() },
-    };
-    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: declineElicitor }),
+    );
     expectErrorMatching(result, /User declined run_project/);
   });
 

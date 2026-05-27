@@ -8,11 +8,11 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import {
-  stripResPrefix,
   readMainSceneFromProject,
   resolveLaunchScene,
   extractSceneScripts,
 } from '../../src/utils/scene-parsing.js';
+import { stripResPrefix } from '../../src/utils/path-validation.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 
 const tmp = useTmpDirs();

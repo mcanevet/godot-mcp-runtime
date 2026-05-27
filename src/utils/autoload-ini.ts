@@ -39,6 +39,36 @@ function assertValidName(name: string): void {
   }
 }
 
+/**
+ * Iterate every non-blank, non-comment data line inside the named INI section
+ * of `content`. The callback receives each line with its surrounding whitespace
+ * trimmed. Stops only at end of content; the callback should return a falsy
+ * value to continue or any truthy value to short-circuit.
+ *
+ * Used wherever code needs to read a single project.godot section without
+ * spinning up Godot — `[autoload]`, `[application]`, etc. The shared walker
+ * keeps the section-header + skip-comment skeleton in one place.
+ */
+export function walkIniSection(
+  content: string,
+  sectionName: string,
+  onLine: (trimmed: string) => boolean | void,
+): void {
+  const targetHeader = `[${sectionName}]`;
+  let inSection = false;
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[')) {
+      inSection = trimmed === targetHeader;
+      continue;
+    }
+    if (!inSection || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#')) {
+      continue;
+    }
+    if (onLine(trimmed)) return;
+  }
+}
+
 export function normalizeAutoloadPath(p: string): string {
   return p.startsWith('res://') ? p : `res://${p}`;
 }
@@ -46,16 +76,8 @@ export function normalizeAutoloadPath(p: string): string {
 export function parseAutoloads(projectFilePath: string, existingContent?: string): AutoloadEntry[] {
   const content = existingContent ?? readFileSync(projectFilePath, 'utf8');
   const autoloads: AutoloadEntry[] = [];
-  let inAutoloadSection = false;
 
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[')) {
-      inAutoloadSection = trimmed === '[autoload]';
-      continue;
-    }
-    if (!inAutoloadSection || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#'))
-      continue;
+  walkIniSection(content, 'autoload', (trimmed) => {
     // The surrounding `"?` are intentional: Godot always writes quotes, but
     // hand-edited project.godot files sometimes omit them. Tolerating both
     // shapes means a missing quote pair doesn't silently drop the entry.
@@ -64,7 +86,7 @@ export function parseAutoloads(projectFilePath: string, existingContent?: string
       const [, name = '', star = '', path = ''] = match;
       autoloads.push({ name, singleton: star === '*', path });
     }
-  }
+  });
   return autoloads;
 }
 

@@ -1,10 +1,15 @@
-import { join, sep, resolve } from 'path';
+import { join, sep, resolve, relative } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath, isUnderDir, projectGodotPath } from '../utils/path-validation.js';
+import {
+  validateSubPath,
+  isUnderDir,
+  projectGodotPath,
+  stripResPrefix,
+} from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -24,7 +29,7 @@ import {
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
-import { extractSceneScripts, resolveLaunchScene, stripResPrefix } from '../utils/scene-parsing.js';
+import { extractSceneScripts, resolveLaunchScene } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -429,6 +434,21 @@ export const runtimeToolDefinitions = [
 // --- Helpers ---
 
 const MAX_RUNTIME_ERROR_CONTEXT_LINES = 30;
+const MAX_POLICY_SOLUTIONS = 4;
+const MAX_STRICT_REJECT_LINES_SHOWN = 5;
+const MAX_SCAN_WARNINGS_SHOWN = 10;
+
+function formatMoreFindingsSuffix(total: number): string {
+  if (total <= 1) return '';
+  const extra = total - 1;
+  return ` (+${extra} more finding${extra > 1 ? 's' : ''})`;
+}
+
+function isElicitAccepted(result: ElicitorResult): boolean {
+  return (
+    result.action === 'accept' && (result.content === undefined || result.content.confirm === true)
+  );
+}
 
 /**
  * Parse a JSON frame returned by the McpBridge. On failure, returns the
@@ -465,12 +485,13 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
 }
 
 /**
- * Type used for the `decision` field of the audit sidecar — mirrors the
- * spec's `decision` enum but adds the `elicit_denied` synthetic value that
- * only applies to writing the audit record (the live `PolicyDecision.decision`
- * never carries it; the handler decides after the elicitation result).
+ * Type used for the `decision` field of the audit sidecar. Adds two synthetic
+ * values that `PolicyDecision.decision` never carries — `elicit_denied` and
+ * `elicit_accepted` are derived from the elicitation outcome by the handler.
+ * Keeping them distinct from `warn` preserves the confirmation event in the
+ * audit trail.
  */
-type AuditDecision = 'hard_block' | 'elicit_denied' | 'warn' | 'ok';
+type AuditDecision = 'hard_block' | 'elicit_denied' | 'elicit_accepted' | 'warn' | 'ok';
 
 interface AuditSidecar {
   decision: AuditDecision;
@@ -534,11 +555,7 @@ function writeAuditSidecar(
 function formatBlockMessage(matches: readonly PolicyMatch[]): string {
   if (matches.length === 0) return 'Blocked by run_script security policy.';
   const head = summarizeMatch(matches[0]!);
-  const tail =
-    matches.length > 1
-      ? ` (+${matches.length - 1} more finding${matches.length > 2 ? 's' : ''})`
-      : '';
-  return `Blocked: ${head}.${tail} The script was not executed.`;
+  return `Blocked: ${head}.${formatMoreFindingsSuffix(matches.length)} The script was not executed.`;
 }
 
 function collectSolutions(matches: readonly PolicyMatch[]): string[] {
@@ -551,25 +568,20 @@ function collectSolutions(matches: readonly PolicyMatch[]): string[] {
         out.push(sol);
       }
     }
-    if (out.length >= 4) break;
+    if (out.length >= MAX_POLICY_SOLUTIONS) break;
   }
   return out;
 }
 
 /**
  * Build a one-line summary of a project-scan finding so `run_project` can
- * attach a `warnings` array without flooding the response.
+ * attach a `warnings` array without flooding the response. Out-of-tree paths
+ * are surfaced verbatim (path.relative would emit `..`-prefixed strings that
+ * obscure where the file actually lives).
  */
 function formatScanFinding(sourcePath: string, projectPath: string, match: PolicyMatch): string {
-  const rel = sourcePath.startsWith(projectPath)
-    ? sourcePath.slice(projectPath.length + 1)
-    : sourcePath;
+  const rel = isUnderDir(projectPath, sourcePath) ? relative(projectPath, sourcePath) : sourcePath;
   return `${rel}:${match.line} ${match.matchedText} — ${match.reason}`;
-}
-
-interface ScanFinding {
-  sourcePath: string;
-  match: PolicyMatch;
 }
 
 /**
@@ -581,19 +593,20 @@ function scanScriptFile(
   filePath: string,
   strict: boolean,
 ): { findings: PolicyMatch[]; warning: string | null } {
+  let source: string;
   try {
-    if (!existsSync(filePath)) {
+    source = readFileSync(filePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { findings: [], warning: `Could not scan ${filePath} (file not found)` };
     }
-    const source = readFileSync(filePath, 'utf8');
-    const decision = evaluateScript(source, { strict });
-    return { findings: decision.matches, warning: null };
-  } catch (error) {
     return {
       findings: [],
       warning: `Could not scan ${filePath}: ${getErrorMessage(error)}`,
     };
   }
+  const decision = evaluateScript(source, strict);
+  return { findings: decision.matches, warning: null };
 }
 
 function ensureRuntimeSession(
@@ -706,7 +719,7 @@ export async function handleRunProject(
   // read errors, "no launchable scene"); both flow into the response warnings
   // array. Strict mode + any Tier 1 finding → hard reject before launch.
   const scanWarnings: string[] = [];
-  const scanFindings: ScanFinding[] = [];
+  const scanFindings: Array<{ sourcePath: string; match: PolicyMatch }> = [];
   const absProjectPath = resolve(projectPath);
   try {
     const projectGodot = projectGodotPath(absProjectPath);
@@ -715,6 +728,12 @@ export async function handleRunProject(
       for (const entry of autoloads) {
         const stripped = stripResPrefix(entry.path);
         if (!stripped.endsWith('.gd')) continue;
+        if (!validateSubPath(absProjectPath, stripped)) {
+          scanWarnings.push(
+            `Skipped autoload ${entry.name}: path "${entry.path}" escapes project root.`,
+          );
+          continue;
+        }
         const filePath = join(absProjectPath, stripped);
         const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
         if (warning) scanWarnings.push(warning);
@@ -735,6 +754,10 @@ export async function handleRunProject(
     } else {
       const scripts = extractSceneScripts(launchScene, absProjectPath);
       for (const filePath of scripts) {
+        if (!isUnderDir(absProjectPath, filePath)) {
+          scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);
+          continue;
+        }
         const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
         if (warning) scanWarnings.push(warning);
         for (const m of findings) {
@@ -748,7 +771,9 @@ export async function handleRunProject(
 
   const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
   if (ctx.strictMode && hasTier1) {
-    const top = scanFindings.filter((f) => f.match.tier === 1).slice(0, 5);
+    const top = scanFindings
+      .filter((f) => f.match.tier === 1)
+      .slice(0, MAX_STRICT_REJECT_LINES_SHOWN);
     const summary = top.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match));
     const more =
       scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
@@ -772,7 +797,7 @@ export async function handleRunProject(
   if (!ctx.sessionState.runProjectConfirmed.has(absProjectPath)) {
     let elicitResult: ElicitorResult;
     try {
-      elicitResult = await ctx.elicitor.elicit({
+      elicitResult = await ctx.elicitor({
         message:
           'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?',
         requestedSchema: {
@@ -791,10 +816,7 @@ export async function handleRunProject(
       );
       elicitResult = { action: 'accept', content: { confirm: true } };
     }
-    const confirmed =
-      elicitResult.action === 'accept' &&
-      (elicitResult.content === undefined || elicitResult.content.confirm === true);
-    if (!confirmed) {
+    if (!isElicitAccepted(elicitResult)) {
       return err(
         createErrorResponse('User declined run_project. The project was not launched.', [
           'Retry run_project once you intend to launch the project',
@@ -906,8 +928,10 @@ export async function handleRunProject(
     ];
     if (allWarnings.length > 0) {
       lines.push('', 'Security scan findings:');
-      for (const w of allWarnings.slice(0, 10)) lines.push(`- ${w}`);
-      if (allWarnings.length > 10) lines.push(`- +${allWarnings.length - 10} more`);
+      for (const w of allWarnings.slice(0, MAX_SCAN_WARNINGS_SHOWN)) lines.push(`- ${w}`);
+      if (allWarnings.length > MAX_SCAN_WARNINGS_SHOWN) {
+        lines.push(`- +${allWarnings.length - MAX_SCAN_WARNINGS_SHOWN} more`);
+      }
     }
 
     const content: Array<{ type: string; [k: string]: unknown }> = [
@@ -1505,7 +1529,7 @@ export async function handleRunScript(
   }
 
   // Static-analysis gate. Decision drives audit + dispatch.
-  const policy = evaluateScript(script, { strict: ctx.strictMode });
+  const policy = evaluateScript(script, ctx.strictMode);
   const projectPath = runner.activeProjectPath;
 
   // Tier 1: hard block. Write audit, refuse to forward to the bridge.
@@ -1526,12 +1550,8 @@ export async function handleRunScript(
     let elicitResult: ElicitorResult;
     try {
       const head = summarizeMatch(policy.matches[0]!);
-      const more =
-        policy.matches.length > 1
-          ? ` (+${policy.matches.length - 1} more finding${policy.matches.length > 2 ? 's' : ''})`
-          : '';
-      elicitResult = await ctx.elicitor.elicit({
-        message: `run_script wants to call ${head}.${more} Proceed?`,
+      elicitResult = await ctx.elicitor({
+        message: `run_script wants to call ${head}.${formatMoreFindingsSuffix(policy.matches.length)} Proceed?`,
         requestedSchema: {
           type: 'object',
           properties: {
@@ -1555,11 +1575,7 @@ export async function handleRunScript(
       );
     }
 
-    const accepted =
-      elicitResult.action === 'accept' &&
-      (elicitResult.content === undefined || elicitResult.content.confirm === true);
-
-    if (!accepted) {
+    if (!isElicitAccepted(elicitResult)) {
       if (projectPath) {
         writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
       }
@@ -1576,9 +1592,14 @@ export async function handleRunScript(
     warningsFromPolicy = matchesToWarnings(policy.matches);
   }
 
-  // Audit successful / warn paths.
+  // Audit successful / warn paths. Tier 2 accept lands here and is recorded
+  // distinctly from a plain Tier 3 warn so the audit trail preserves the
+  // user-confirmation event.
   if (projectPath) {
-    const auditDecision: AuditDecision = policy.decision === 'ok' ? 'ok' : 'warn';
+    let auditDecision: AuditDecision;
+    if (policy.decision === 'ok') auditDecision = 'ok';
+    else if (policy.decision === 'elicit_required') auditDecision = 'elicit_accepted';
+    else auditDecision = 'warn';
     writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
   }
 

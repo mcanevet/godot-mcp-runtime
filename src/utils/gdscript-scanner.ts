@@ -42,6 +42,24 @@ export interface Token {
   column: number;
 }
 
+const IDENT_START_RE = /[A-Za-z_]/;
+const IDENT_PART_RE = /[A-Za-z0-9_]/;
+const DIGIT_RE = /[0-9]/;
+const NODE_PATH_CHAR_RE = /[A-Za-z0-9_/\\]/;
+
+function isIdentStart(ch: string): boolean {
+  return IDENT_START_RE.test(ch);
+}
+function isIdentPart(ch: string): boolean {
+  return IDENT_PART_RE.test(ch);
+}
+function isDigit(ch: string): boolean {
+  return DIGIT_RE.test(ch);
+}
+function isNodePathChar(ch: string): boolean {
+  return NODE_PATH_CHAR_RE.test(ch);
+}
+
 /**
  * Tokens emitted by `tokenize`. Comments and string-literal contents are NOT
  * present — they are consumed silently. String literals as a whole are emitted
@@ -57,10 +75,6 @@ export function tokenize(source: string): Token[] {
   let lineStart = 0;
 
   const colOf = (pos: number): number => pos - lineStart + 1;
-
-  const isIdentStart = (ch: string): boolean => /[A-Za-z_]/.test(ch);
-  const isIdentPart = (ch: string): boolean => /[A-Za-z0-9_]/.test(ch);
-  const isDigit = (ch: string): boolean => /[0-9]/.test(ch);
 
   while (i < len) {
     const ch = source[i]!;
@@ -179,7 +193,7 @@ export function tokenize(source: string): Token[] {
         while (i < len && source[i] !== quote && source[i] !== '\n') i++;
         if (i < len && source[i] === quote) i++;
       } else {
-        while (i < len && /[A-Za-z0-9_/\\]/.test(source[i]!)) i++;
+        while (i < len && isNodePathChar(source[i]!)) i++;
       }
       tokens.push({ kind: 'string', text: '<node-path>', line: startLine, column: startCol });
       continue;
@@ -202,7 +216,7 @@ export function tokenize(source: string): Token[] {
         }
         if (i < len && source[i] === quote) i++;
       } else {
-        while (i < len && /[A-Za-z0-9_]/.test(source[i]!)) i++;
+        while (i < len && isIdentPart(source[i]!)) i++;
       }
       tokens.push({ kind: 'string', text: '<string-name>', line: startLine, column: startCol });
       continue;

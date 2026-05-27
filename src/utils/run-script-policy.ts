@@ -41,10 +41,6 @@ export interface PolicyDecision {
   promotedByStrict: boolean;
 }
 
-export interface EvaluateOptions {
-  strict?: boolean;
-}
-
 // ---------------------------------------------------------------------------
 // Rule shape
 // ---------------------------------------------------------------------------
@@ -92,11 +88,6 @@ function firstArgIsNonLiteral(t: Token | null): boolean {
   // is NOT a non-literal call; we don't want to fire on `load()`.
   if (t === null) return false;
   return t.kind !== 'string';
-}
-
-function isAbsolutePathLiteral(t: Token | null): boolean {
-  if (t === null || t.kind !== 'string') return false;
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -500,9 +491,6 @@ export const policyRules: readonly PolicyRule[] = [
   },
 ];
 
-// Avoid an unused-helper warning until a rule needs absolute-path detection.
-void isAbsolutePathLiteral;
-
 // ---------------------------------------------------------------------------
 // Evaluation
 // ---------------------------------------------------------------------------
@@ -559,8 +547,7 @@ function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
   return true;
 }
 
-export function evaluateScript(source: string, options: EvaluateOptions = {}): PolicyDecision {
-  const strict = options.strict === true;
+export function evaluateScript(source: string, strict = false): PolicyDecision {
   const tokens = tokenize(source);
   const matches: PolicyMatch[] = [];
   let promotedByStrict = false;

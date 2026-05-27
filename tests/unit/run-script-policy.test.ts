@@ -153,8 +153,8 @@ describe('evaluateScript — clean scripts', () => {
 describe('evaluateScript — strict mode promotion', () => {
   it('promotes Tier 2 to Tier 1 when strict:true', () => {
     const source = VALID_PREFIX + 'var h = HTTPRequest.new()\n';
-    const lax = evaluateScript(source, { strict: false });
-    const strict = evaluateScript(source, { strict: true });
+    const lax = evaluateScript(source, false);
+    const strict = evaluateScript(source, true);
     expect(lax.decision).toBe('elicit_required');
     expect(lax.promotedByStrict).toBe(false);
     expect(strict.decision).toBe('hard_block');
@@ -164,14 +164,14 @@ describe('evaluateScript — strict mode promotion', () => {
 
   it('does NOT promote Tier 3 in strict mode', () => {
     const source = VALID_PREFIX + 'var r = load("res://foo.tscn")\n';
-    const strict = evaluateScript(source, { strict: true });
+    const strict = evaluateScript(source, true);
     expect(strict.decision).toBe('warn');
     expect(strict.promotedByStrict).toBe(false);
   });
 
   it('promotes only the matching Tier 2 finding; pre-existing Tier 1 stays Tier 1', () => {
     const source = VALID_PREFIX + 'OS.execute("evil")\n' + '\tvar h = HTTPRequest.new()\n';
-    const strict = evaluateScript(source, { strict: true });
+    const strict = evaluateScript(source, true);
     expect(strict.decision).toBe('hard_block');
     expect(strict.effectiveTier).toBe(1);
     expect(strict.promotedByStrict).toBe(true);

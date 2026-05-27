@@ -17,7 +17,7 @@ import { GodotRunner } from './utils/godot-runner.js';
 import { getErrorMessage } from './utils/error-response.js';
 
 import { dispatchToolCall } from './dispatch.js';
-import { createContextFromServer, type McpContext } from './utils/mcp-context.js';
+import type { Elicitor, McpContext } from './utils/mcp-context.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
 import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
@@ -52,6 +52,30 @@ Key behaviors:
 - click_element in simulate_input resolves by node path or node name (BFS search), NOT by visible text. Use get_ui_elements to discover valid element identifiers.
 - run_script expects GDScript with "extends RefCounted" and "func execute(scene_tree: SceneTree) -> Variant".
 - run_project spawns Godot without -d so runtime errors do not pause execution; the \`breakpoint\` keyword in user code is a no-op (no debugger is attached). SCRIPT ERROR output and GDScript backtraces still appear in stderr.`;
+
+/**
+ * Build the request-scoped context backed by a live MCP `Server`. Lives here
+ * (not in `utils/mcp-context.ts`) so the SDK coupling stays in the bin entry.
+ */
+function createContextFromServer(server: Server): McpContext {
+  const elicitor: Elicitor = async (request) => {
+    // The SDK's elicitInput param type is a strict zod-inferred shape; we
+    // build the request with an `object`-shaped requestedSchema that matches
+    // the protocol at runtime, so cast to satisfy the narrower TS check.
+    const result = await server.elicitInput({
+      message: request.message,
+      requestedSchema: request.requestedSchema,
+    } as unknown as Parameters<typeof server.elicitInput>[0]);
+    return result.content
+      ? { action: result.action, content: result.content as Record<string, unknown> }
+      : { action: result.action };
+  };
+  return {
+    elicitor,
+    strictMode: process.env.GODOT_MCP_STRICT === 'true',
+    sessionState: { runProjectConfirmed: new Set<string>() },
+  };
+}
 
 class GodotMcpServer {
   private server: Server;

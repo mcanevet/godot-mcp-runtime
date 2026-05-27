@@ -18,17 +18,25 @@ export function validatePath(path: string): boolean {
 }
 
 /**
+ * Strip a leading `res://` (Godot's project-root URI) from a project resource
+ * path. Returns the input unchanged if no prefix is present.
+ */
+export function stripResPrefix(path: string): string {
+  return path.startsWith('res://') ? path.slice('res://'.length) : path;
+}
+
+/**
  * Stricter check for paths that must stay inside `projectPath`. Rejects `..`
  * (via `validatePath`) and absolute paths that escape the project root.
  * `path.join('/project', '/etc/passwd')` resolves to `/etc/passwd`, so the
  * basic `..`-substring check alone permits absolute-path traversal.
  *
- * Tolerates a leading `res://` (Godot's project-root URI) by stripping it
- * before resolving — autoload entries and resource paths use this prefix.
+ * Tolerates a leading `res://` by stripping it before resolving — autoload
+ * entries and resource paths use this prefix.
  */
 export function validateSubPath(projectPath: string, userPath: string): boolean {
   if (!validatePath(userPath)) return false;
-  const stripped = userPath.startsWith('res://') ? userPath.slice('res://'.length) : userPath;
+  const stripped = stripResPrefix(userPath);
   if (!stripped) return false;
   const projectRoot = resolve(projectPath);
   const resolved = resolve(projectRoot, stripped);

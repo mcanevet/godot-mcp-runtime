@@ -105,7 +105,7 @@ If your tool's `inputSchema` has:
 
 ## 6. Security policy for GDScript-executing tools
 
-Any tool that forwards arbitrary GDScript to a running Godot process — `run_script` today, and any future sibling — MUST route the source through `evaluateScript(source, { strict: ctx.strictMode })` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
+Any tool that forwards arbitrary GDScript to a running Godot process — `run_script` today, and any future sibling — MUST route the source through `evaluateScript(source, ctx.strictMode)` from `src/utils/run-script-policy.ts` **before** calling the bridge. The policy table is the single auditable surface; don't add inline regex checks in the handler, don't replicate the rule list in another module, and don't ship a new "trusted-script" shortcut that skips the gate.
 
 For tools that launch a Godot project (`run_project`) or attach to one, the same module's helpers (`parseAutoloads`, `extractSceneScripts`, `resolveLaunchScene`) drive the pre-flight scan over autoloads and the launched scene's top-level scripts. Findings flow into the response `warnings` array in non-strict mode; strict mode hard-rejects on Tier 1.
 

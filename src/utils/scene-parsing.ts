@@ -15,16 +15,13 @@
  * attack surface.
  */
 
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join } from 'path';
-import { projectGodotPath } from './path-validation.js';
+import { projectGodotPath, stripResPrefix } from './path-validation.js';
+import { walkIniSection } from './autoload-ini.js';
 
-/**
- * Strip a leading `res://` from a project resource path. Returns the input
- * unchanged if no prefix is present. Pure path manipulation; no I/O.
- */
-export function stripResPrefix(path: string): string {
-  return path.startsWith('res://') ? path.slice('res://'.length) : path;
+function isFileNotFound(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
 /**
@@ -33,26 +30,24 @@ export function stripResPrefix(path: string): string {
  */
 export function readMainSceneFromProject(projectDir: string): string | null {
   const projectFile = projectGodotPath(projectDir);
-  if (!existsSync(projectFile)) return null;
-  const content = readFileSync(projectFile, 'utf8');
-  let inApplication = false;
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('[')) {
-      inApplication = trimmed === '[application]';
-      continue;
-    }
-    if (!inApplication || trimmed === '' || trimmed.startsWith(';') || trimmed.startsWith('#')) {
-      continue;
-    }
+  let content: string;
+  try {
+    content = readFileSync(projectFile, 'utf8');
+  } catch (err) {
+    if (isFileNotFound(err)) return null;
+    throw err;
+  }
+  let mainScene: string | null = null;
+  walkIniSection(content, 'application', (trimmed) => {
     // Match: run/main_scene="res://main.tscn"  (quotes are always present
     // when Godot writes; tolerate omitted quotes for hand-edited files).
     const match = trimmed.match(/^run\/main_scene\s*=\s*"?([^"]+?)"?$/);
     if (match && match[1]) {
-      return match[1];
+      mainScene = match[1];
+      return true;
     }
-  }
-  return null;
+  });
+  return mainScene;
 }
 
 /**
@@ -93,8 +88,13 @@ export function resolveLaunchScene(projectDir: string, sceneArg?: string | null)
  *    responsible for the existence check (and recording a warning).
  */
 export function extractSceneScripts(scenePath: string, projectDir: string): string[] {
-  if (!existsSync(scenePath)) return [];
-  const content = readFileSync(scenePath, 'utf8');
+  let content: string;
+  try {
+    content = readFileSync(scenePath, 'utf8');
+  } catch (err) {
+    if (isFileNotFound(err)) return [];
+    throw err;
+  }
   const result: string[] = [];
   // ext_resource lines look like:
   //   [ext_resource type="Script" path="res://scripts/foo.gd" id="1_xxx"]
