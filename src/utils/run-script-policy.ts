@@ -1,0 +1,638 @@
+/**
+ * Declarative policy table + evaluator for run_script / run_project security
+ * gating. The rule catalogue here is the single auditable surface — see
+ * `docs/security.md` for the rationale on each tier assignment.
+ *
+ * Three tiers:
+ *  - Tier 1 (hard_block): server refuses; bridge never sees the script.
+ *  - Tier 2 (elicit_required): server asks client/user; strict mode promotes
+ *    these to Tier 1.
+ *  - Tier 3 (warn): executes, appended to the response `warnings` array.
+ *
+ * The evaluator is pure — no I/O, no client coupling. Handlers integrate the
+ * decision with the elicitor and audit sidecar.
+ */
+
+import { tokenize, type Token } from './gdscript-scanner.js';
+
+export type Tier = 1 | 2 | 3;
+
+export type Decision = 'hard_block' | 'elicit_required' | 'warn' | 'ok';
+
+export interface PolicyMatch {
+  ruleId: string;
+  tier: Tier;
+  line: number;
+  column: number;
+  matchedText: string;
+  reason: string;
+  solutions: string[];
+}
+
+export interface PolicyDecision {
+  decision: Decision;
+  /**
+   * Highest tier among matches AFTER strict-mode promotion. `null` when no
+   * rule matched (decision === 'ok').
+   */
+  effectiveTier: Tier | null;
+  matches: PolicyMatch[];
+  /** True when strict mode rewrote one or more Tier 2 matches to Tier 1. */
+  promotedByStrict: boolean;
+}
+
+export interface EvaluateOptions {
+  strict?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Rule shape
+// ---------------------------------------------------------------------------
+
+/**
+ * A rule matches when the tokenizer emits a `memberChain` whose `chain`
+ * array starts with `chain` (exact prefix match). `argumentCheck` may further
+ * narrow the match by inspecting the token immediately following a `(`
+ * — used to distinguish `load("res://foo")` (literal, Tier 3) from
+ * `load(some_var)` (non-literal, Tier 1).
+ */
+interface PolicyRule {
+  id: string;
+  tier: Tier;
+  /** Member chain that must appear as a prefix. e.g. ['OS','execute']. */
+  chain: readonly string[];
+  /**
+   * Optional refinement applied to the call's first argument token. Receives
+   * the first non-whitespace token after the opening paren, or `null` if no
+   * paren follows. Returns true to keep the match. If absent, any context
+   * matches.
+   */
+  argumentCheck?: (firstArg: Token | null) => boolean;
+  /**
+   * Optional: also fire when the chain appears as a bare identifier (e.g.
+   * `load(...)` rather than `Foo.load(...)`). Used for the global functions
+   * `load`, `preload`, `str_to_var`, `bytes_to_var_with_objects`.
+   */
+  matchAsBareIdentifier?: boolean;
+  reason: string;
+  solutions: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Argument checks
+// ---------------------------------------------------------------------------
+
+function firstArgIsLiteralString(t: Token | null): boolean {
+  return t !== null && t.kind === 'string';
+}
+
+function firstArgIsNonLiteral(t: Token | null): boolean {
+  // Non-literal first arg = anything other than a string literal. A call with
+  // no arguments (`firstArg === null` — the next token is the closing paren)
+  // is NOT a non-literal call; we don't want to fire on `load()`.
+  if (t === null) return false;
+  return t.kind !== 'string';
+}
+
+function isAbsolutePathLiteral(t: Token | null): boolean {
+  if (t === null || t.kind !== 'string') return false;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Rule table
+// ---------------------------------------------------------------------------
+
+export const policyRules: readonly PolicyRule[] = [
+  // ---- Tier 1: direct exec ----
+  {
+    id: 'tier1.direct_exec.OS.execute',
+    tier: 1,
+    chain: ['OS', 'execute'],
+    reason: 'OS.execute can run arbitrary OS commands',
+    solutions: [
+      'Use the scene_tree argument to interact with the project',
+      'For OS-level work, use a separate authorized tool outside the run_script gate',
+    ],
+  },
+  {
+    id: 'tier1.direct_exec.OS.create_process',
+    tier: 1,
+    chain: ['OS', 'create_process'],
+    reason: 'OS.create_process spawns external processes',
+    solutions: ['Restructure the script to operate only on the scene tree'],
+  },
+  {
+    id: 'tier1.direct_exec.OS.execute_with_pipe',
+    tier: 1,
+    chain: ['OS', 'execute_with_pipe'],
+    reason: 'OS.execute_with_pipe spawns external processes',
+    solutions: ['Restructure the script to operate only on the scene tree'],
+  },
+  {
+    id: 'tier1.direct_exec.OS.shell_open',
+    tier: 1,
+    chain: ['OS', 'shell_open'],
+    reason: 'OS.shell_open hands a path to the host shell',
+    solutions: ['Remove the shell_open call'],
+  },
+  {
+    id: 'tier1.direct_exec.OS.kill',
+    tier: 1,
+    chain: ['OS', 'kill'],
+    reason: 'OS.kill terminates external processes',
+    solutions: ['Remove the kill call'],
+  },
+  {
+    id: 'tier1.direct_exec.OS.set_environment',
+    tier: 1,
+    chain: ['OS', 'set_environment'],
+    reason: 'OS.set_environment mutates the process environment',
+    solutions: ['Remove the environment mutation'],
+  },
+  {
+    id: 'tier1.direct_exec.OS.unset_environment',
+    tier: 1,
+    chain: ['OS', 'unset_environment'],
+    reason: 'OS.unset_environment mutates the process environment',
+    solutions: ['Remove the environment mutation'],
+  },
+  {
+    id: 'tier1.direct_exec.OS.set_restart_on_exit',
+    tier: 1,
+    chain: ['OS', 'set_restart_on_exit'],
+    reason: 'OS.set_restart_on_exit changes process restart behavior',
+    solutions: ['Remove the call'],
+  },
+
+  // ---- Tier 1: resource-pack persistence ----
+  {
+    id: 'tier1.resource_pack.load',
+    tier: 1,
+    chain: ['ProjectSettings', 'load_resource_pack'],
+    reason: 'ProjectSettings.load_resource_pack mounts arbitrary PCK files',
+    solutions: ['Remove the load_resource_pack call'],
+  },
+  {
+    id: 'tier1.resource_pack.save',
+    tier: 1,
+    chain: ['ProjectSettings', 'save'],
+    reason: 'ProjectSettings.save writes a new project.godot',
+    solutions: ['Modify ProjectSettings only via the dedicated MCP tools'],
+  },
+  {
+    id: 'tier1.resource_pack.save_custom',
+    tier: 1,
+    chain: ['ProjectSettings', 'save_custom'],
+    reason: 'ProjectSettings.save_custom writes a project.godot variant',
+    solutions: ['Modify ProjectSettings only via the dedicated MCP tools'],
+  },
+
+  // ---- Tier 1: engine tampering ----
+  {
+    id: 'tier1.engine.get_singleton',
+    tier: 1,
+    chain: ['Engine', 'get_singleton'],
+    reason: 'Engine.get_singleton can return user-mutable global state',
+    solutions: ['Access singletons by name directly, not through Engine.get_singleton'],
+  },
+  {
+    id: 'tier1.engine.register_singleton',
+    tier: 1,
+    chain: ['Engine', 'register_singleton'],
+    reason: 'Engine.register_singleton injects global state',
+    solutions: ['Remove the register_singleton call'],
+  },
+  {
+    id: 'tier1.engine.register_script_language',
+    tier: 1,
+    chain: ['Engine', 'register_script_language'],
+    reason: 'Engine.register_script_language extends the runtime',
+    solutions: ['Remove the register_script_language call'],
+  },
+
+  // ---- Tier 1: reflection bypasses ----
+  {
+    id: 'tier1.reflection.ClassDB.instantiate',
+    tier: 1,
+    chain: ['ClassDB', 'instantiate'],
+    reason: 'ClassDB.instantiate can construct any registered class by name',
+    solutions: ['Construct the class directly: `var x = TheClass.new()`'],
+  },
+  {
+    id: 'tier1.reflection.ClassDB.class_call_static',
+    tier: 1,
+    chain: ['ClassDB', 'class_call_static'],
+    reason: 'ClassDB.class_call_static invokes arbitrary static methods by name',
+    solutions: ['Call the static method directly with its qualified name'],
+  },
+  {
+    id: 'tier1.reflection.Object.set_script',
+    tier: 1,
+    chain: ['Object', 'set_script'],
+    reason: 'set_script attaches arbitrary code to an object',
+    solutions: ['Attach scripts at scene-edit time via the attach_script MCP tool'],
+  },
+  {
+    id: 'tier1.reflection.Node.set_script',
+    tier: 1,
+    chain: ['Node', 'set_script'],
+    reason: 'set_script attaches arbitrary code to a node',
+    solutions: ['Attach scripts at scene-edit time via the attach_script MCP tool'],
+  },
+
+  // ---- Tier 1: dynamic code ----
+  {
+    id: 'tier1.dynamic.Expression',
+    tier: 1,
+    chain: ['Expression'],
+    reason: 'Expression evaluates arbitrary GDScript expressions at runtime',
+    solutions: ['Compute the value directly in GDScript instead of via Expression'],
+  },
+  {
+    id: 'tier1.dynamic.str_to_var',
+    tier: 1,
+    chain: ['str_to_var'],
+    matchAsBareIdentifier: true,
+    reason: 'str_to_var deserializes GDScript values, including code-bearing types',
+    solutions: ['Parse the input format manually'],
+  },
+  {
+    id: 'tier1.dynamic.bytes_to_var_with_objects',
+    tier: 1,
+    chain: ['bytes_to_var_with_objects'],
+    matchAsBareIdentifier: true,
+    reason: 'bytes_to_var_with_objects deserializes objects, including scripts',
+    solutions: ['Use bytes_to_var (no _with_objects) for data-only deserialization'],
+  },
+
+  // ---- Tier 1: ConfigFile load family ----
+  {
+    id: 'tier1.config.ConfigFile.load',
+    tier: 1,
+    chain: ['ConfigFile', 'load'],
+    reason: 'ConfigFile.load can pull in attacker-controlled config',
+    solutions: ['Load configuration from a known-safe path via FileAccess.READ'],
+  },
+  {
+    id: 'tier1.config.ConfigFile.load_encrypted',
+    tier: 1,
+    chain: ['ConfigFile', 'load_encrypted'],
+    reason: 'ConfigFile.load_encrypted decrypts and loads attacker-controlled data',
+    solutions: ['Remove the ConfigFile.load_encrypted call'],
+  },
+  {
+    id: 'tier1.config.ConfigFile.parse',
+    tier: 1,
+    chain: ['ConfigFile', 'parse'],
+    reason: 'ConfigFile.parse evaluates arbitrary config strings',
+    solutions: ['Remove the ConfigFile.parse call'],
+  },
+
+  // ---- Tier 1: non-literal load/preload/call ----
+  {
+    id: 'tier1.indirect.load.nonliteral',
+    tier: 1,
+    chain: ['load'],
+    matchAsBareIdentifier: true,
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'load() with a non-literal path can be redirected to any resource',
+    solutions: ['Pass a literal `res://...` path string to load()'],
+  },
+  {
+    id: 'tier1.indirect.preload.nonliteral',
+    tier: 1,
+    chain: ['preload'],
+    matchAsBareIdentifier: true,
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'preload() with a non-literal path can be redirected',
+    solutions: ['Pass a literal `res://...` path string to preload()'],
+  },
+  {
+    id: 'tier1.indirect.ResourceLoader.load.nonliteral',
+    tier: 1,
+    chain: ['ResourceLoader', 'load'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'ResourceLoader.load with a non-literal path can be redirected',
+    solutions: ['Pass a literal `res://...` path to ResourceLoader.load'],
+  },
+  {
+    id: 'tier1.indirect.Object.call.nonliteral',
+    tier: 1,
+    chain: ['Object', 'call'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'Object.call with a non-literal method name is a dynamic dispatch',
+    solutions: ['Call the method directly by name'],
+  },
+  {
+    id: 'tier1.indirect.Object.callv.nonliteral',
+    tier: 1,
+    chain: ['Object', 'callv'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'Object.callv with a non-literal method name is a dynamic dispatch',
+    solutions: ['Call the method directly by name'],
+  },
+
+  // ---- Tier 2: filesystem writes ----
+  // NOTE: FileAccess.open with WRITE mode requires looking at the second
+  // argument; we conservatively flag FileAccess.open uniformly at Tier 2 and
+  // rely on the warn-tier surface for the read-only literal case. This
+  // matches the spec's bias toward over-eliciting filesystem mutation.
+  {
+    id: 'tier2.fs.FileAccess.open',
+    tier: 2,
+    chain: ['FileAccess', 'open'],
+    reason: 'FileAccess.open may write to disk depending on the mode flag',
+    solutions: [
+      'If reading, confirm READ mode and continue',
+      'If writing, restructure the script to use a dedicated MCP write tool',
+    ],
+  },
+  {
+    id: 'tier2.fs.DirAccess.remove',
+    tier: 2,
+    chain: ['DirAccess', 'remove'],
+    reason: 'DirAccess.remove deletes files',
+    solutions: ['Confirm the deletion is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.remove_absolute',
+    tier: 2,
+    chain: ['DirAccess', 'remove_absolute'],
+    reason: 'DirAccess.remove_absolute deletes files outside the project root',
+    solutions: ['Remove the call'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.copy',
+    tier: 2,
+    chain: ['DirAccess', 'copy'],
+    reason: 'DirAccess.copy writes files',
+    solutions: ['Confirm the copy is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.rename',
+    tier: 2,
+    chain: ['DirAccess', 'rename'],
+    reason: 'DirAccess.rename mutates the filesystem',
+    solutions: ['Confirm the rename is intentional'],
+  },
+  {
+    id: 'tier2.fs.DirAccess.create_link',
+    tier: 2,
+    chain: ['DirAccess', 'create_link'],
+    reason: 'DirAccess.create_link creates filesystem links',
+    solutions: ['Confirm the link creation is intentional'],
+  },
+
+  // ---- Tier 2: network ----
+  {
+    id: 'tier2.net.HTTPRequest',
+    tier: 2,
+    chain: ['HTTPRequest'],
+    reason: 'HTTPRequest opens outbound HTTP connections',
+    solutions: ['Confirm the network call is intentional'],
+  },
+  {
+    id: 'tier2.net.HTTPClient',
+    tier: 2,
+    chain: ['HTTPClient'],
+    reason: 'HTTPClient opens outbound HTTP connections',
+    solutions: ['Confirm the network call is intentional'],
+  },
+  {
+    id: 'tier2.net.TCPServer',
+    tier: 2,
+    chain: ['TCPServer'],
+    reason: 'TCPServer opens an inbound TCP listener',
+    solutions: ['Confirm the listener is intentional'],
+  },
+  {
+    id: 'tier2.net.StreamPeerTCP',
+    tier: 2,
+    chain: ['StreamPeerTCP'],
+    reason: 'StreamPeerTCP opens outbound TCP connections',
+    solutions: ['Confirm the network call is intentional'],
+  },
+  {
+    id: 'tier2.net.WebSocketPeer',
+    tier: 2,
+    chain: ['WebSocketPeer'],
+    reason: 'WebSocketPeer opens WebSocket connections',
+    solutions: ['Confirm the network call is intentional'],
+  },
+  {
+    id: 'tier2.net.PacketPeerUDP',
+    tier: 2,
+    chain: ['PacketPeerUDP'],
+    reason: 'PacketPeerUDP opens UDP sockets',
+    solutions: ['Confirm the network call is intentional'],
+  },
+  {
+    id: 'tier2.net.UDPServer',
+    tier: 2,
+    chain: ['UDPServer'],
+    reason: 'UDPServer opens UDP listeners',
+    solutions: ['Confirm the listener is intentional'],
+  },
+  {
+    id: 'tier2.net.StreamPeerTLS',
+    tier: 2,
+    chain: ['StreamPeerTLS'],
+    reason: 'StreamPeerTLS opens TLS connections',
+    solutions: ['Confirm the network call is intentional'],
+  },
+  {
+    id: 'tier2.net.IP.resolve_hostname',
+    tier: 2,
+    chain: ['IP', 'resolve_hostname'],
+    reason: 'IP.resolve_hostname makes DNS queries',
+    solutions: ['Confirm the DNS lookup is intentional'],
+  },
+  {
+    id: 'tier2.net.IP.resolve_hostname_addresses',
+    tier: 2,
+    chain: ['IP', 'resolve_hostname_addresses'],
+    reason: 'IP.resolve_hostname_addresses makes DNS queries',
+    solutions: ['Confirm the DNS lookup is intentional'],
+  },
+
+  // ---- Tier 3: warn (literal load/preload/call) ----
+  {
+    id: 'tier3.literal.load',
+    tier: 3,
+    chain: ['load'],
+    matchAsBareIdentifier: true,
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'load() with a literal path can run _init code in the loaded resource',
+    solutions: ['Verify the resource path is trusted'],
+  },
+  {
+    id: 'tier3.literal.preload',
+    tier: 3,
+    chain: ['preload'],
+    matchAsBareIdentifier: true,
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'preload() with a literal path can run _init code in the loaded resource',
+    solutions: ['Verify the resource path is trusted'],
+  },
+  {
+    id: 'tier3.literal.ResourceLoader.load',
+    tier: 3,
+    chain: ['ResourceLoader', 'load'],
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'ResourceLoader.load with a literal path can run _init code',
+    solutions: ['Verify the resource path is trusted'],
+  },
+  {
+    id: 'tier3.literal.Object.call',
+    tier: 3,
+    chain: ['Object', 'call'],
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'Object.call with a literal method name',
+    solutions: ['Consider calling the method directly'],
+  },
+  {
+    id: 'tier3.os_alert',
+    tier: 3,
+    chain: ['OS', 'alert'],
+    reason: 'OS.alert opens a modal dialog and blocks the project',
+    solutions: ['Remove the OS.alert call if running headlessly'],
+  },
+];
+
+// Avoid an unused-helper warning until a rule needs absolute-path detection.
+void isAbsolutePathLiteral;
+
+// ---------------------------------------------------------------------------
+// Evaluation
+// ---------------------------------------------------------------------------
+
+/**
+ * Find the first non-whitespace, non-newline token AFTER position `from` in
+ * `tokens`. Returns null if the next significant token is a `)` (no-arg call)
+ * or if the end of the stream is reached.
+ */
+function firstArgumentToken(tokens: readonly Token[], from: number): Token | null {
+  for (let j = from; j < tokens.length; j++) {
+    const tok = tokens[j]!;
+    if (tok.kind === 'newline') continue;
+    if (tok.kind === 'punct' && tok.text === ')') return null;
+    return tok;
+  }
+  return null;
+}
+
+/**
+ * True when the token at index `i` is followed by a `(` (allowing newlines
+ * between for the multi-line call style). Returns the index of the `(`, or
+ * -1 if no opening paren follows.
+ */
+function indexOfOpenParen(tokens: readonly Token[], i: number): number {
+  for (let j = i + 1; j < tokens.length; j++) {
+    const tok = tokens[j]!;
+    if (tok.kind === 'newline') continue;
+    if (tok.kind === 'punct' && tok.text === '(') return j;
+    return -1;
+  }
+  return -1;
+}
+
+function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
+  if (rule.matchAsBareIdentifier && rule.chain.length === 1 && tok.kind === 'identifier') {
+    return tok.text === rule.chain[0];
+  }
+  if (rule.chain.length === 1) {
+    // Single-segment "chain" applied to a type reference like `Expression` or
+    // `HTTPRequest` — match against identifier OR the first segment of any
+    // member chain (e.g. `HTTPRequest.new` is a chain whose head matches).
+    if (tok.kind === 'identifier') return tok.text === rule.chain[0];
+    if (tok.kind === 'memberChain' && tok.chain && tok.chain.length > 0) {
+      return tok.chain[0] === rule.chain[0];
+    }
+    return false;
+  }
+  if (tok.kind !== 'memberChain' || !tok.chain) return false;
+  if (tok.chain.length < rule.chain.length) return false;
+  for (let i = 0; i < rule.chain.length; i++) {
+    if (tok.chain[i] !== rule.chain[i]) return false;
+  }
+  return true;
+}
+
+export function evaluateScript(source: string, options: EvaluateOptions = {}): PolicyDecision {
+  const strict = options.strict === true;
+  const tokens = tokenize(source);
+  const matches: PolicyMatch[] = [];
+  let promotedByStrict = false;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (tok.kind !== 'identifier' && tok.kind !== 'memberChain') continue;
+
+    for (const rule of policyRules) {
+      if (!tokenMatchesRule(tok, rule)) continue;
+
+      let firstArg: Token | null = null;
+      const openParen = indexOfOpenParen(tokens, i);
+      if (openParen !== -1) {
+        firstArg = firstArgumentToken(tokens, openParen + 1);
+      }
+
+      if (rule.argumentCheck) {
+        if (openParen === -1) continue;
+        if (!rule.argumentCheck(firstArg)) continue;
+      }
+
+      let effectiveTier: Tier = rule.tier;
+      if (strict && rule.tier === 2) {
+        effectiveTier = 1;
+        promotedByStrict = true;
+      }
+
+      matches.push({
+        ruleId: rule.id,
+        tier: effectiveTier,
+        line: tok.line,
+        column: tok.column,
+        matchedText: tok.text,
+        reason: rule.reason,
+        solutions: rule.solutions,
+      });
+      // Each token may only fire one rule (the first match wins). Subsequent
+      // rules of the same kind would only duplicate the finding.
+      break;
+    }
+  }
+
+  let highest: Tier | null = null;
+  for (const m of matches) {
+    if (highest === null || m.tier < highest) highest = m.tier;
+  }
+
+  let decision: Decision = 'ok';
+  if (highest === 1) decision = 'hard_block';
+  else if (highest === 2) decision = 'elicit_required';
+  else if (highest === 3) decision = 'warn';
+
+  return {
+    decision,
+    effectiveTier: highest,
+    matches,
+    promotedByStrict,
+  };
+}
+
+/**
+ * Format a one-line summary of the highest-priority finding. Used to build
+ * the agent-facing error message on Tier 1 hard-block and Tier 2 denial.
+ */
+export function summarizeMatch(m: PolicyMatch): string {
+  return `line ${m.line} ${m.matchedText} — ${m.reason}`;
+}
+
+/**
+ * Build the human-readable warnings array attached to a `warn` decision.
+ */
+export function matchesToWarnings(matches: readonly PolicyMatch[]): string[] {
+  return matches.map((m) => `Warning line ${m.line}: ${m.matchedText} — ${m.reason}`);
+}

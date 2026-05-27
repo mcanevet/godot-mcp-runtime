@@ -1,4 +1,5 @@
 import type { GodotRunner } from './utils/godot-runner.js';
+import type { McpContext } from './utils/mcp-context.js';
 import type { Result } from './utils/result.js';
 import type { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import type { nodeToolDefinitions } from './tools/node-tools.js';
@@ -54,9 +55,15 @@ export interface ToolSuccessPayload {
 
 export type HandlerResult = Result<ToolSuccessPayload, ToolResponse>;
 
+/**
+ * Tool handler signature. The optional `ctx` carries the request-scoped MCP
+ * context (elicitor + strict mode + session state). Handlers that don't need
+ * the context can omit the parameter — `dispatchToolCall` always supplies one.
+ */
 export type ToolHandler = (
   runner: GodotRunner,
   args: OperationParams,
+  ctx?: McpContext,
 ) => Promise<HandlerResult> | HandlerResult;
 
 export type ToolName = (

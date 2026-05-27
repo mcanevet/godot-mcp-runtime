@@ -15,6 +15,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
 import type { GodotRunner } from './utils/godot-runner.js';
 import type { OperationParams, ToolHandler, ToolName, ToolResponse } from './mcp.types.js';
+import { createNullContext, type McpContext } from './utils/mcp-context.js';
 import { isOk } from './utils/result.js';
 
 import {
@@ -119,12 +120,13 @@ export async function dispatchToolCall(
   runner: GodotRunner,
   toolName: string,
   args: OperationParams,
+  ctx: McpContext = createNullContext(),
 ): Promise<ToolResponse> {
-  const handler = toolDispatch[toolName as ToolName];
+  const handler = toolDispatch[toolName as ToolName] as ToolHandler | undefined;
   if (!handler) {
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
   }
-  const result = await handler(runner, args);
+  const result = await handler(runner, args, ctx);
   // Map Result → MCP wire shape. The error branch already carries
   // `isError: true` from createErrorResponse; the success branch flows
   // through verbatim. This is the only edge where the wire envelope is

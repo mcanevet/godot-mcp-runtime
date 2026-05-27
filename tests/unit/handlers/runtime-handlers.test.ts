@@ -36,6 +36,30 @@ import type {
 } from '../../../src/utils/godot-runner.js';
 import { hasError, expectErrorMatching, unwrap } from '../../helpers/assertions.js';
 import { useTmpDirs } from '../../helpers/tmp.js';
+import { createNullContext, type McpContext } from '../../../src/utils/mcp-context.js';
+
+// ---------------------------------------------------------------------------
+// MCP context fakes
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a context that auto-accepts the run_project session gate AND any
+ * Tier 2 run_script elicitations. Tests that exercise the gate explicitly
+ * should construct their own context.
+ */
+function acceptingContext(opts: { strict?: boolean } = {}): McpContext {
+  return {
+    elicitor: {
+      async elicit() {
+        return { action: 'accept', content: { confirm: true } };
+      },
+    },
+    strictMode: opts.strict === true,
+    sessionState: { runProjectConfirmed: new Set<string>() },
+  };
+}
+
+void createNullContext; // kept available for tests that want a decline-by-default context
 
 // ---------------------------------------------------------------------------
 // Runtime fake runner
@@ -238,7 +262,11 @@ describe('handleRunProject validation', () => {
   it('returns a "set GODOT_PATH" error when no Godot executable can be resolved', async () => {
     const fake = createRuntimeFake();
     // godotPath stays empty (default), so the precheck must fire.
-    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
     expectErrorMatching(result, /Could not find a valid Godot executable path/);
     const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/GODOT_PATH/);
@@ -253,7 +281,11 @@ describe('handleRunProject validation', () => {
           'Godot requires a display to run a project window.',
       ),
     );
-    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
     expectErrorMatching(result, /No display server available/);
     const solutionsText = unwrap(result).content[1]?.text ?? '';
     expect(solutionsText).toMatch(/attach_project/);
@@ -285,7 +317,11 @@ describe('handleRunProject validation', () => {
         process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
       });
     };
-    const result = await handleRunProject(runner, { projectPath: fixtureProjectPath });
+    const result = await handleRunProject(
+      runner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
     expectErrorMatching(result, /exited before.*bridge/i);
     expect(stopCalled).toBe(true);
   });
@@ -296,7 +332,11 @@ describe('handleRunProject bridge port', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(true);
-    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
     expect(hasError(result)).toBe(false);
     const text = unwrap(result).content[0].text;
     expect(text).toMatch(/port \d+/);
@@ -334,7 +374,11 @@ describe('handleRunProject bridge failure paths', () => {
       return undefined;
     };
     (fake.asRunner as unknown as { runProject: unknown }).runProject = runProjectExited;
-    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
     expectErrorMatching(result, /exited before the MCP bridge could initialize/);
     // Handler must tear down before returning so retry works cleanly.
     expect(fake.stopCalls()).toBe(1);
@@ -346,7 +390,11 @@ describe('handleRunProject bridge failure paths', () => {
     fake.setBridgeReady(false, 'timeout after 5s');
     // The default fake.runProject sets process with hasExited=false, so the
     // handler takes the timeout branch (not the process-exited branch).
-    const result = await handleRunProject(fake.asRunner, { projectPath: fixtureProjectPath });
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: fixtureProjectPath },
+      acceptingContext(),
+    );
     expectErrorMatching(result, /bridge did not respond/);
     expect(fake.stopCalls()).toBe(1);
   });
@@ -848,6 +896,316 @@ describe('handleRunScript', () => {
     expect(readFileSync(join(scriptsDir, files[0]), 'utf8')).toBe(VALID_SCRIPT);
     // Filename is a numeric timestamp + UUID suffix to avoid collisions.
     expect(files[0]).toMatch(/^\d+-[0-9a-f-]+\.gd$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleRunScript — security policy gate (Tier 1 / Tier 2 / Tier 3)
+// ---------------------------------------------------------------------------
+
+describe('handleRunScript security policy', () => {
+  const TIER1_SCRIPT =
+    'extends RefCounted\nfunc execute(scene_tree):\n\tOS.execute("rm", ["-rf", "/"])\n\treturn 0\n';
+  const TIER2_SCRIPT =
+    'extends RefCounted\nfunc execute(scene_tree):\n\tvar h = HTTPRequest.new()\n\treturn h\n';
+  const TIER3_SCRIPT =
+    'extends RefCounted\nfunc execute(scene_tree):\n\tvar r = load("res://main.tscn")\n\treturn r\n';
+
+  function activeFake(dir: string): RuntimeFake {
+    const fake = createRuntimeFake();
+    fake.setSession({
+      mode: 'spawned',
+      projectPath: dir,
+      process: makeRunningProcess(),
+    });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }), []);
+    return fake;
+  }
+
+  it('hard-blocks Tier 1 OS.execute before reaching the bridge', async () => {
+    const dir = tmp.makeProject('run-script-tier1-');
+    const fake = activeFake(dir);
+    const result = await handleRunScript(fake.asRunner, { script: TIER1_SCRIPT });
+    expectErrorMatching(result, /Blocked.*OS\.execute/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+    // Sidecar should record hard_block.
+    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    expect(sidecarFile).toBeDefined();
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('hard_block');
+    expect(sidecar.tier).toBe(1);
+  });
+
+  it('elicits on Tier 2 HTTPRequest and proceeds on accept', async () => {
+    const dir = tmp.makeProject('run-script-tier2-accept-');
+    const fake = activeFake(dir);
+    const ctx: McpContext = {
+      elicitor: {
+        async elicit() {
+          return { action: 'accept', content: { confirm: true } };
+        },
+      },
+      strictMode: false,
+      sessionState: { runProjectConfirmed: new Set() },
+    };
+    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls).toHaveLength(1);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
+  });
+
+  it('rejects Tier 2 on decline without reaching the bridge', async () => {
+    const dir = tmp.makeProject('run-script-tier2-decline-');
+    const fake = activeFake(dir);
+    const ctx: McpContext = {
+      elicitor: {
+        async elicit() {
+          return { action: 'decline' };
+        },
+      },
+      strictMode: false,
+      sessionState: { runProjectConfirmed: new Set() },
+    };
+    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    expectErrorMatching(result, /User declined.*HTTPRequest/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('falls back to denial when elicitation throws (older client)', async () => {
+    const dir = tmp.makeProject('run-script-tier2-noclient-');
+    const fake = activeFake(dir);
+    const ctx: McpContext = {
+      elicitor: {
+        async elicit() {
+          throw new Error('Method not found');
+        },
+      },
+      strictMode: false,
+      sessionState: { runProjectConfirmed: new Set() },
+    };
+    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    expectErrorMatching(result, /Elicitation unavailable/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('strict mode promotes Tier 2 to hard block without elicitation', async () => {
+    const dir = tmp.makeProject('run-script-strict-');
+    const fake = activeFake(dir);
+    let elicitCalled = false;
+    const ctx: McpContext = {
+      elicitor: {
+        async elicit() {
+          elicitCalled = true;
+          return { action: 'accept' };
+        },
+      },
+      strictMode: true,
+      sessionState: { runProjectConfirmed: new Set() },
+    };
+    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT }, ctx);
+    expectErrorMatching(result, /Blocked.*HTTPRequest/);
+    expect(elicitCalled).toBe(false);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('warns on Tier 3 literal load() and still executes', async () => {
+    const dir = tmp.makeProject('run-script-tier3-');
+    const fake = activeFake(dir);
+    const result = await handleRunScript(fake.asRunner, { script: TIER3_SCRIPT });
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls).toHaveLength(1);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes('load'))).toBe(true);
+  });
+
+  it('writes a .policy.json sidecar alongside the .gd file', async () => {
+    const dir = tmp.makeProject('run-script-sidecar-');
+    const fake = activeFake(dir);
+    await handleRunScript(fake.asRunner, { script: TIER3_SCRIPT });
+    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const files = readdirSync(scriptsDir);
+    const gd = files.find((f) => f.endsWith('.gd'));
+    const sidecar = files.find((f) => f.endsWith('.policy.json'));
+    expect(gd).toBeDefined();
+    expect(sidecar).toBeDefined();
+    // Same base name prefix.
+    expect(gd!.replace(/\.gd$/, '')).toBe(sidecar!.replace(/\.policy\.json$/, ''));
+    const parsed = JSON.parse(readFileSync(join(scriptsDir, sidecar!), 'utf8'));
+    expect(parsed.decision).toBe('warn');
+    expect(parsed.tier).toBe(3);
+    expect(parsed.findings).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleRunProject — security policy pre-flight scan + session gate
+// ---------------------------------------------------------------------------
+
+describe('handleRunProject security pre-flight', () => {
+  function makeProjectWithAutoload(prefix: string, autoloadGd: string): string {
+    const dir = tmp.makeProject(
+      prefix,
+      'config_version=5\n\n[application]\n[autoload]\nMyAuto="res://auto.gd"\n',
+    );
+    writeFileSync(join(dir, 'auto.gd'), autoloadGd, 'utf8');
+    return dir;
+  }
+
+  it('attaches autoload Tier 1 findings as warnings in non-strict mode', async () => {
+    const dir = makeProjectWithAutoload(
+      'run-project-autoload-tier1-',
+      'extends Node\nfunc _ready():\n\tOS.execute("rm", ["-rf"])\n',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).toMatch(/Security scan findings/);
+    expect(text).toMatch(/OS\.execute/);
+  });
+
+  it('strict mode hard-rejects when autoload contains Tier 1 primitives', async () => {
+    const dir = makeProjectWithAutoload(
+      'run-project-strict-tier1-',
+      'extends Node\nfunc _ready():\n\tOS.execute("rm", ["-rf"])\n',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      acceptingContext({ strict: true }),
+    );
+    expectErrorMatching(result, /Strict mode: refusing to launch/);
+    // Bridge must NOT be reached.
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('strict mode allows launch when only Tier 3 findings present', async () => {
+    const dir = makeProjectWithAutoload(
+      'run-project-strict-tier3-',
+      'extends Node\nfunc _ready():\n\tload("res://main.tscn")\n',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      acceptingContext({ strict: true }),
+    );
+    expect(hasError(result)).toBe(false);
+  });
+
+  it('skips scene-script scan and records a warning when no main_scene configured', async () => {
+    const dir = tmp.makeProject('run-project-no-scene-', 'config_version=5\n\n[application]\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).toMatch(/No launchable scene found/);
+  });
+
+  it('session gate elicits once and skips on subsequent calls', async () => {
+    const dir = tmp.makeProject('run-project-gate-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    let elicitCount = 0;
+    const ctx: McpContext = {
+      elicitor: {
+        async elicit() {
+          elicitCount++;
+          return { action: 'accept', content: { confirm: true } };
+        },
+      },
+      strictMode: false,
+      sessionState: { runProjectConfirmed: new Set() },
+    };
+    await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+    await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+    await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+    expect(elicitCount).toBe(1);
+  });
+
+  it('session gate decline blocks the launch', async () => {
+    const dir = tmp.makeProject('run-project-gate-decline-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const ctx: McpContext = {
+      elicitor: {
+        async elicit() {
+          return { action: 'decline' };
+        },
+      },
+      strictMode: false,
+      sessionState: { runProjectConfirmed: new Set() },
+    };
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, ctx);
+    expectErrorMatching(result, /User declined run_project/);
+  });
+
+  it('scans the launched scene resolved from run/main_scene', async () => {
+    const dir = tmp.makeProject(
+      'run-project-main-scene-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(dir, 'attack.gd'),
+      'extends Node\nfunc _ready():\n\tOS.execute("x")\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://attack.gd" id="1"]\n\n[node name="Main" type="Node2D"]\n',
+      'utf8',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(fake.asRunner, { projectPath: dir }, acceptingContext());
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).toMatch(/attack\.gd:3.*OS\.execute/);
+  });
+
+  it('explicit scene arg overrides main_scene during scan', async () => {
+    const dir = tmp.makeProject(
+      'run-project-explicit-scene-',
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(dir, 'clean.gd'), 'extends Node\n', 'utf8');
+    writeFileSync(join(dir, 'attack.gd'), 'extends Node\n\tOS.execute("x")\n', 'utf8');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://attack.gd" id="1"]\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'other.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://clean.gd" id="1"]\n',
+      'utf8',
+    );
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    // Explicit `other.tscn` should be scanned, NOT main.tscn — so no OS.execute warning.
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir, scene: 'other.tscn' },
+      acceptingContext(),
+    );
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).not.toMatch(/OS\.execute/);
   });
 });
 

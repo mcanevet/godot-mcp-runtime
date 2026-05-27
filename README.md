@@ -151,11 +151,26 @@ If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will 
 
 Ask your AI assistant to call `get_project_info`. If it returns a Godot version string (e.g., `4.4.stable`), you're connected and working.
 
+## Security model
+
+`run_script` and `run_project` execute arbitrary GDScript inside the live Godot process, which runs with full user privileges. The server defends against this with a three-tier static-analysis gate that inspects GDScript before forwarding it to the bridge:
+
+- **Tier 1 (hard block)** — direct exec (`OS.execute`/`shell_open`/…), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), and non-literal `load`/`preload`/`call` are rejected server-side.
+- **Tier 2 (elicit)** — filesystem writes (`FileAccess.open`, `DirAccess.remove`) and network primitives (`HTTPRequest`, `TCPServer`, …) trigger a user-confirmation prompt via MCP elicitation.
+- **Tier 3 (warn)** — literal `load("res://…")` and similar common idioms execute, but findings surface in the response `warnings` array.
+
+`run_project` runs the same scan over `[autoload]` scripts and scripts attached to the launched scene before spawning Godot.
+
+Set `GODOT_MCP_STRICT=true` to promote every Tier 2 finding to a hard block — needed for unattended operation where MCP client bypass-permissions modes auto-accept elicitation. Off by default.
+
+Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/scripts/`. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
+
 ## Docs
 
 - [`docs/tools.md`](docs/tools.md) — full tool reference, grouped by category
 - [`docs/tool-authoring.md`](docs/tool-authoring.md) — standards for adding or modifying tools
 - [`docs/architecture.md`](docs/architecture.md) — source layout, bridge sequence diagram, lifecycle steps, runtime artifact behavior
+- [`docs/security.md`](docs/security.md) — `run_script` / `run_project` security model, full rule catalogue, strict-mode behavior
 
 ## Acknowledgments
 

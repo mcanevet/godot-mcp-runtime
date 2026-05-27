@@ -92,6 +92,22 @@ Tool handlers return `createErrorResponse(message, possibleSolutions[])`, not ra
 
 Tool input schemas declare camelCase params. `normalizeParameters` converts incoming snake_case to camelCase (for tolerance with clients that send the wire-protocol style); `convertCamelToSnakeCase` converts back when calling GDScript, which expects snake_case. Add new mappings to the `parameterMappings` table in `src/utils/parameter-conversion.ts`.
 
+### `run_script` and `run_project` security gate
+
+`run_script` accepts arbitrary GDScript and forwards it to a running Godot process, where it executes with full user privileges. `run_project` launches autoloads and the main scene, which is equally arbitrary code. Both route through a static-analysis gate in `src/utils/run-script-policy.ts` before reaching the bridge.
+
+The gate emits a three-tier decision:
+
+- **Tier 1 — hard block.** Direct exec (`OS.execute`/`shell_open`), reflection bypasses (`ClassDB.instantiate`, `Object.set_script`), dynamic code (`Expression`, `str_to_var`), non-literal indirection (`load(var)`, `Object.call(var)`). Server rejects without forwarding.
+- **Tier 2 — elicit.** Filesystem writes (`FileAccess.open`, `DirAccess.remove`) and network primitives (`HTTPRequest`, `TCPServer`, `IP.resolve_hostname`). Server pauses for user confirmation via MCP elicitation. Declines and elicitation-unsupported clients both map to denial.
+- **Tier 3 — warn.** Literal `load("res://…")`, `OS.alert`, and common idioms. Executes; findings surface in the response `warnings` array.
+
+`GODOT_MCP_STRICT=true` promotes every Tier 2 finding to Tier 1, and makes `run_project` hard-reject on any Tier 1 finding in autoloads or the launched scene. This is the unattended-operation switch — MCP client bypass-permissions modes auto-answer elicitation, so strict mode is the only real boundary when no human is in the loop.
+
+Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/scripts/`. See `docs/security.md` for the full rule catalogue.
+
+When adding a new tool that forwards GDScript to the bridge, route it through the same policy evaluator — don't inline rejection logic.
+
 ### MCP SDK: `Server` vs `McpServer`
 
 `src/index.ts` imports the lower-level `Server` class from `@modelcontextprotocol/sdk`, which is marked `@deprecated`. This is deliberate. The high-level `McpServer` API expects Zod shapes for tool input schemas, but our ~30 tools share a centralized JSON Schema `ToolDefinition` type and a custom dispatch table (`src/dispatch.ts`). The deprecation note explicitly carves out "advanced use cases" — that's us.

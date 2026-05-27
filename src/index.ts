@@ -17,6 +17,7 @@ import { GodotRunner } from './utils/godot-runner.js';
 import { getErrorMessage } from './utils/error-response.js';
 
 import { dispatchToolCall } from './dispatch.js';
+import { createContextFromServer, type McpContext } from './utils/mcp-context.js';
 import { runtimeToolDefinitions } from './tools/runtime-tools.js';
 import { autoloadToolDefinitions } from './tools/autoload-tools.js';
 import { projectToolDefinitions } from './tools/project-tools.js';
@@ -55,6 +56,7 @@ Key behaviors:
 class GodotMcpServer {
   private server: Server;
   private runner: GodotRunner;
+  private ctx: McpContext;
 
   constructor(config?: GodotServerConfig) {
     this.runner = new GodotRunner(config);
@@ -71,6 +73,11 @@ class GodotMcpServer {
         instructions: serverInstructions,
       },
     );
+
+    this.ctx = createContextFromServer(this.server);
+    if (this.ctx.strictMode) {
+      console.error('[SERVER] Strict mode enabled (GODOT_MCP_STRICT=true)');
+    }
 
     this.setupToolHandlers();
 
@@ -104,7 +111,7 @@ class GodotMcpServer {
 
       console.error(`[SERVER] Handling tool request: ${toolName}`);
 
-      return await dispatchToolCall(this.runner, toolName, args);
+      return await dispatchToolCall(this.runner, toolName, args, this.ctx);
     });
   }
 

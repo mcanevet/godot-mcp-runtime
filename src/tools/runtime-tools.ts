@@ -4,7 +4,7 @@ import type { GodotRunner } from '../utils/godot-runner.js';
 import { BRIDGE_WAIT_SPAWNED_TIMEOUT_MS } from '../utils/bridge-protocol.js';
 import type { HandlerResult, OperationParams, ToolDefinition, ToolResponse } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validateSubPath, isUnderDir } from '../utils/path-validation.js';
+import { validateSubPath, isUnderDir, projectGodotPath } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import {
   parseProjectArgs,
@@ -15,6 +15,16 @@ import {
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
+import { createNullContext, type McpContext, type ElicitorResult } from '../utils/mcp-context.js';
+import {
+  evaluateScript,
+  matchesToWarnings,
+  summarizeMatch,
+  type PolicyDecision,
+  type PolicyMatch,
+} from '../utils/run-script-policy.js';
+import { parseAutoloads } from '../utils/autoload-ini.js';
+import { extractSceneScripts, resolveLaunchScene, stripResPrefix } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -454,6 +464,138 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
   }
 }
 
+/**
+ * Type used for the `decision` field of the audit sidecar — mirrors the
+ * spec's `decision` enum but adds the `elicit_denied` synthetic value that
+ * only applies to writing the audit record (the live `PolicyDecision.decision`
+ * never carries it; the handler decides after the elicitation result).
+ */
+type AuditDecision = 'hard_block' | 'elicit_denied' | 'warn' | 'ok';
+
+interface AuditSidecar {
+  decision: AuditDecision;
+  tier: 1 | 2 | 3 | null;
+  strict_mode: boolean;
+  promoted_by_strict: boolean;
+  findings: Array<{
+    rule: string;
+    line: number;
+    column: number;
+    matched_text: string;
+  }>;
+  timestamp: string;
+}
+
+/**
+ * Write the audit pair (.gd + .policy.json) to `.mcp/scripts/`. Both writes
+ * are best-effort — failures are logged via `logDebug` and never propagate,
+ * matching the pre-existing `run_script` audit contract.
+ */
+function writeAuditSidecar(
+  projectPath: string,
+  script: string,
+  decision: AuditDecision,
+  policy: PolicyDecision,
+  strictMode: boolean,
+): void {
+  try {
+    const scriptsDir = join(projectPath, '.mcp', 'scripts');
+    mkdirSync(scriptsDir, { recursive: true });
+    const baseName = `${Date.now()}-${randomUUID()}`;
+    const scriptFile = join(scriptsDir, `${baseName}.gd`);
+    writeFileSync(scriptFile, script, 'utf8');
+
+    const sidecar: AuditSidecar = {
+      decision,
+      tier: policy.effectiveTier,
+      strict_mode: strictMode,
+      promoted_by_strict: policy.promotedByStrict,
+      findings: policy.matches.map((m) => ({
+        rule: m.ruleId,
+        line: m.line,
+        column: m.column,
+        matched_text: m.matchedText,
+      })),
+      timestamp: new Date().toISOString(),
+    };
+    const sidecarFile = join(scriptsDir, `${baseName}.policy.json`);
+    writeFileSync(sidecarFile, JSON.stringify(sidecar, null, 2), 'utf8');
+    logDebug(`Saved script + policy sidecar to ${scriptFile}`);
+  } catch (error) {
+    logDebug(`Failed to write audit sidecar: ${error}`);
+  }
+}
+
+/**
+ * Build the agent-facing message for a Tier 1 block. Names the first match
+ * + a `+N more` suffix when applicable. The message is intentionally short
+ * and self-contained — it stands alone in the error response.
+ */
+function formatBlockMessage(matches: readonly PolicyMatch[]): string {
+  if (matches.length === 0) return 'Blocked by run_script security policy.';
+  const head = summarizeMatch(matches[0]!);
+  const tail =
+    matches.length > 1
+      ? ` (+${matches.length - 1} more finding${matches.length > 2 ? 's' : ''})`
+      : '';
+  return `Blocked: ${head}.${tail} The script was not executed.`;
+}
+
+function collectSolutions(matches: readonly PolicyMatch[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of matches) {
+    for (const sol of m.solutions) {
+      if (!seen.has(sol)) {
+        seen.add(sol);
+        out.push(sol);
+      }
+    }
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+/**
+ * Build a one-line summary of a project-scan finding so `run_project` can
+ * attach a `warnings` array without flooding the response.
+ */
+function formatScanFinding(sourcePath: string, projectPath: string, match: PolicyMatch): string {
+  const rel = sourcePath.startsWith(projectPath)
+    ? sourcePath.slice(projectPath.length + 1)
+    : sourcePath;
+  return `${rel}:${match.line} ${match.matchedText} — ${match.reason}`;
+}
+
+interface ScanFinding {
+  sourcePath: string;
+  match: PolicyMatch;
+}
+
+/**
+ * Scan a single .gd file. Missing/unreadable files are reported as a single
+ * warning string (the second tuple element); the caller decides whether to
+ * surface them. Tier and strict promotion semantics match `evaluateScript`.
+ */
+function scanScriptFile(
+  filePath: string,
+  strict: boolean,
+): { findings: PolicyMatch[]; warning: string | null } {
+  try {
+    if (!existsSync(filePath)) {
+      return { findings: [], warning: `Could not scan ${filePath} (file not found)` };
+    }
+    const source = readFileSync(filePath, 'utf8');
+    const decision = evaluateScript(source, { strict });
+    return { findings: decision.matches, warning: null };
+  } catch (error) {
+    return {
+      findings: [],
+      warning: `Could not scan ${filePath}: ${getErrorMessage(error)}`,
+    };
+  }
+}
+
 function ensureRuntimeSession(
   runner: GodotRunner,
   actionDescription: string,
@@ -537,6 +679,7 @@ export async function handleLaunchEditor(
 export async function handleRunProject(
   runner: GodotRunner,
   args: OperationParams,
+  ctx: McpContext = createNullContext(),
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
@@ -556,6 +699,109 @@ export async function handleRunProject(
         ),
       );
     }
+  }
+
+  // Pre-flight security scan: autoloads + launched scene's top-level scripts.
+  // Result is a list of findings + a list of scan warnings (file-not-found,
+  // read errors, "no launchable scene"); both flow into the response warnings
+  // array. Strict mode + any Tier 1 finding → hard reject before launch.
+  const scanWarnings: string[] = [];
+  const scanFindings: ScanFinding[] = [];
+  const absProjectPath = resolve(projectPath);
+  try {
+    const projectGodot = projectGodotPath(absProjectPath);
+    if (existsSync(projectGodot)) {
+      const autoloads = parseAutoloads(projectGodot);
+      for (const entry of autoloads) {
+        const stripped = stripResPrefix(entry.path);
+        if (!stripped.endsWith('.gd')) continue;
+        const filePath = join(absProjectPath, stripped);
+        const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
+        if (warning) scanWarnings.push(warning);
+        for (const m of findings) {
+          scanFindings.push({ sourcePath: filePath, match: m });
+        }
+      }
+    }
+    const launchScene = resolveLaunchScene(absProjectPath, scene.value);
+    if (launchScene === null) {
+      scanWarnings.push(
+        'No launchable scene found (no `run/main_scene` and no explicit scene arg); scene-script scan skipped.',
+      );
+    } else if (!existsSync(launchScene)) {
+      scanWarnings.push(
+        `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
+      );
+    } else {
+      const scripts = extractSceneScripts(launchScene, absProjectPath);
+      for (const filePath of scripts) {
+        const { findings, warning } = scanScriptFile(filePath, ctx.strictMode);
+        if (warning) scanWarnings.push(warning);
+        for (const m of findings) {
+          scanFindings.push({ sourcePath: filePath, match: m });
+        }
+      }
+    }
+  } catch (error) {
+    scanWarnings.push(`run_project pre-flight scan failed: ${getErrorMessage(error)}`);
+  }
+
+  const hasTier1 = scanFindings.some((f) => f.match.tier === 1);
+  if (ctx.strictMode && hasTier1) {
+    const top = scanFindings.filter((f) => f.match.tier === 1).slice(0, 5);
+    const summary = top.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match));
+    const more =
+      scanFindings.length > top.length ? ` (+${scanFindings.length - top.length} more)` : '';
+    return err(
+      createErrorResponse(
+        [
+          `Strict mode: refusing to launch project because autoload or launched-scene scripts contain Tier 1 primitives${more}.`,
+          ...summary.map((s) => `- ${s}`),
+        ].join('\n'),
+        [
+          'Remove or refactor the flagged primitives',
+          'Unset GODOT_MCP_STRICT to launch with warnings (Tier 1 findings will surface in `warnings`)',
+        ],
+      ),
+    );
+  }
+
+  // Session-confirmation gate: one elicitation per absolute projectPath per
+  // server session. Skipped when an active runtime session already targets
+  // the same project (the user just attached/ran).
+  if (!ctx.sessionState.runProjectConfirmed.has(absProjectPath)) {
+    let elicitResult: ElicitorResult;
+    try {
+      elicitResult = await ctx.elicitor.elicit({
+        message:
+          'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?',
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            confirm: { type: 'boolean', description: 'Allow run_project to launch the project' },
+          },
+          required: ['confirm'],
+        },
+      });
+    } catch (error) {
+      // Elicitation unsupported — fall through with a recorded warning. The
+      // tiered scan above is the real security boundary; the gate is UX.
+      scanWarnings.push(
+        `Elicitation unavailable (${getErrorMessage(error)}); launching without explicit user confirmation.`,
+      );
+      elicitResult = { action: 'accept', content: { confirm: true } };
+    }
+    const confirmed =
+      elicitResult.action === 'accept' &&
+      (elicitResult.content === undefined || elicitResult.content.confirm === true);
+    if (!confirmed) {
+      return err(
+        createErrorResponse('User declined run_project. The project was not launched.', [
+          'Retry run_project once you intend to launch the project',
+        ]),
+      );
+    }
+    ctx.sessionState.runProjectConfirmed.add(absProjectPath);
   }
 
   if (!runner.getGodotPath()) {
@@ -654,10 +900,21 @@ export async function handleRunProject(
     if (isBackground) {
       lines.push('- Background mode: window hidden, physical input blocked');
     }
+    const allWarnings = [
+      ...scanFindings.map((f) => formatScanFinding(f.sourcePath, absProjectPath, f.match)),
+      ...scanWarnings,
+    ];
+    if (allWarnings.length > 0) {
+      lines.push('', 'Security scan findings:');
+      for (const w of allWarnings.slice(0, 10)) lines.push(`- ${w}`);
+      if (allWarnings.length > 10) lines.push(`- +${allWarnings.length - 10} more`);
+    }
 
-    return ok({
-      content: [{ type: 'text', text: lines.join('\n') }],
-    });
+    const content: Array<{ type: string; [k: string]: unknown }> = [
+      { type: 'text', text: lines.join('\n') },
+    ];
+
+    return ok({ content });
   } catch (error: unknown) {
     const errorMessage = getErrorMessage(error);
     if (errorMessage.includes('No display server available')) {
@@ -1221,6 +1478,7 @@ export async function handleGetUiElements(
 export async function handleRunScript(
   runner: GodotRunner,
   args: OperationParams,
+  ctx: McpContext = createNullContext(),
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
 
@@ -1246,19 +1504,82 @@ export async function handleRunScript(
     );
   }
 
-  // Write script to .mcp/scripts/ for audit trail
-  try {
-    const projectPath = runner.activeProjectPath;
+  // Static-analysis gate. Decision drives audit + dispatch.
+  const policy = evaluateScript(script, { strict: ctx.strictMode });
+  const projectPath = runner.activeProjectPath;
+
+  // Tier 1: hard block. Write audit, refuse to forward to the bridge.
+  if (policy.decision === 'hard_block') {
     if (projectPath) {
-      const scriptsDir = join(projectPath, '.mcp', 'scripts');
-      mkdirSync(scriptsDir, { recursive: true });
-      const timestamp = Date.now();
-      const scriptFile = join(scriptsDir, `${timestamp}-${randomUUID()}.gd`);
-      writeFileSync(scriptFile, script, 'utf8');
-      logDebug(`Saved script to ${scriptFile}`);
+      writeAuditSidecar(projectPath, script, 'hard_block', policy, ctx.strictMode);
     }
-  } catch (error) {
-    logDebug(`Failed to save script for audit: ${error}`);
+    return err(
+      createErrorResponse(formatBlockMessage(policy.matches), collectSolutions(policy.matches)),
+    );
+  }
+
+  // Tier 2: elicit. Single prompt for the script — name the first finding +
+  // `+N more` suffix. Decline / cancel / elicitation-unavailable all map to
+  // denial. The audit sidecar records the actual outcome.
+  let warningsFromPolicy: string[] = [];
+  if (policy.decision === 'elicit_required') {
+    let elicitResult: ElicitorResult;
+    try {
+      const head = summarizeMatch(policy.matches[0]!);
+      const more =
+        policy.matches.length > 1
+          ? ` (+${policy.matches.length - 1} more finding${policy.matches.length > 2 ? 's' : ''})`
+          : '';
+      elicitResult = await ctx.elicitor.elicit({
+        message: `run_script wants to call ${head}.${more} Proceed?`,
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            confirm: { type: 'boolean', description: 'Allow the script to run' },
+          },
+          required: ['confirm'],
+        },
+      });
+    } catch (error) {
+      if (projectPath) {
+        writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+      }
+      return err(
+        createErrorResponse(
+          `Elicitation unavailable: ${policy.matches[0]?.matchedText ?? 'Tier 2 primitive'} requires user confirmation but the client does not support elicitation. Cause: ${getErrorMessage(error)}`,
+          [
+            'Restructure the script to avoid the flagged primitive',
+            'Use an MCP client that supports the elicitation/create capability',
+          ],
+        ),
+      );
+    }
+
+    const accepted =
+      elicitResult.action === 'accept' &&
+      (elicitResult.content === undefined || elicitResult.content.confirm === true);
+
+    if (!accepted) {
+      if (projectPath) {
+        writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+      }
+      return err(
+        createErrorResponse(
+          `User declined: ${summarizeMatch(policy.matches[0]!)}. The script was not executed.`,
+          collectSolutions(policy.matches),
+        ),
+      );
+    }
+    // Accept proceeds — record warnings for the success payload.
+    warningsFromPolicy = matchesToWarnings(policy.matches);
+  } else if (policy.decision === 'warn') {
+    warningsFromPolicy = matchesToWarnings(policy.matches);
+  }
+
+  // Audit successful / warn paths.
+  if (projectPath) {
+    const auditDecision: AuditDecision = policy.decision === 'ok' ? 'ok' : 'warn';
+    writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
   }
 
   const timeout = typeof args.timeout === 'number' ? args.timeout : 30000;
@@ -1301,17 +1622,21 @@ export async function handleRunScript(
         );
       }
 
+      const nullPayload: Record<string, unknown> = {
+        success: true,
+        result: null,
+        warning:
+          'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
+        tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
+      };
+      if (warningsFromPolicy.length > 0) {
+        nullPayload.warnings = warningsFromPolicy;
+      }
       return ok({
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
-              success: true,
-              result: null,
-              warning:
-                'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
-              tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
-            }),
+            text: JSON.stringify(nullPayload),
           },
         ],
       });
@@ -1322,7 +1647,10 @@ export async function handleRunScript(
       result: parsed.result,
       tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
     };
-    attachRuntimeWarnings(payload, runtimeErrors);
+    const combinedWarnings = [...warningsFromPolicy, ...runtimeErrors];
+    if (combinedWarnings.length > 0) {
+      payload.warnings = combinedWarnings.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
+    }
 
     return ok({
       content: [
