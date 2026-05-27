@@ -109,9 +109,11 @@ describe('tokenize: line continuation', () => {
     // line for line numbering of the next token.
     const tokens = tokenize('var x = 1 \\\n+ 2\nOS.execute()\n');
     const chain = tokens.find((t) => t.kind === 'memberChain');
-    // The continuation collapses lines 1 and 2 into a single logical newline
-    // emission; OS.execute lives on the line after the next.
+    // The continuation increments line (1→2) without emitting newline; then
+    // the `\n` after `+ 2` emits newline and increments (2→3). OS.execute
+    // therefore lives on physical line 3.
     expect(chain?.text).toBe('OS.execute');
+    expect(chain?.line).toBe(3);
   });
 });
 

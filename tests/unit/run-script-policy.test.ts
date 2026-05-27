@@ -209,3 +209,160 @@ describe('evaluateScript — finding line numbers', () => {
     expect(d.matches[0]?.line).toBe(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Smoke tests for rules not covered above. One positive sample per rule.
+// Negative coverage lives in the "clean scripts" block.
+// ---------------------------------------------------------------------------
+
+describe('evaluateScript — Tier 1 OS family (smoke)', () => {
+  it('blocks OS.kill(...)', () => {
+    expect(evalLine('OS.kill(1234)').effectiveTier).toBe(1);
+  });
+  it('blocks OS.execute_with_pipe(...)', () => {
+    expect(evalLine('OS.execute_with_pipe("/bin/sh", [])').effectiveTier).toBe(1);
+  });
+  it('blocks OS.set_environment(...)', () => {
+    expect(evalLine('OS.set_environment("PATH", "/evil")').effectiveTier).toBe(1);
+  });
+  it('blocks OS.unset_environment(...)', () => {
+    expect(evalLine('OS.unset_environment("PATH")').effectiveTier).toBe(1);
+  });
+  it('blocks OS.set_restart_on_exit(...)', () => {
+    expect(evalLine('OS.set_restart_on_exit(true)').effectiveTier).toBe(1);
+  });
+});
+
+describe('evaluateScript — Tier 1 ProjectSettings/Engine/ClassDB (smoke)', () => {
+  it('blocks ProjectSettings.save(...)', () => {
+    expect(evalLine('ProjectSettings.save()').effectiveTier).toBe(1);
+  });
+  it('blocks ProjectSettings.save_custom(...)', () => {
+    expect(evalLine('ProjectSettings.save_custom("res://x.cfg")').effectiveTier).toBe(1);
+  });
+  it('blocks Engine.register_singleton(...)', () => {
+    expect(evalLine('Engine.register_singleton("Foo", obj)').effectiveTier).toBe(1);
+  });
+  it('blocks Engine.register_script_language(...)', () => {
+    expect(evalLine('Engine.register_script_language(lang)').effectiveTier).toBe(1);
+  });
+  it('blocks ClassDB.class_call_static(...)', () => {
+    expect(evalLine('ClassDB.class_call_static("OS", "execute", [])').effectiveTier).toBe(1);
+  });
+});
+
+describe('evaluateScript — Tier 1 reflection + dynamic (smoke)', () => {
+  it('blocks Node.set_script(...) literal receiver', () => {
+    expect(evalLine('Node.set_script(some_node, my_script)').effectiveTier).toBe(1);
+  });
+  it('blocks bytes_to_var_with_objects as bare identifier', () => {
+    expect(evalLine('var v = bytes_to_var_with_objects(data)').effectiveTier).toBe(1);
+  });
+});
+
+describe('evaluateScript — Tier 1 ConfigFile family (smoke)', () => {
+  it('blocks ConfigFile.load(...)', () => {
+    expect(evalLine('var r = ConfigFile.load("res://x.cfg")').effectiveTier).toBe(1);
+  });
+  it('blocks ConfigFile.load_encrypted(...)', () => {
+    expect(evalLine('ConfigFile.load_encrypted(path, key)').effectiveTier).toBe(1);
+  });
+  it('blocks ConfigFile.parse(...)', () => {
+    expect(evalLine('ConfigFile.parse(data)').effectiveTier).toBe(1);
+  });
+});
+
+describe('evaluateScript — Tier 1 Object.callv non-literal (smoke)', () => {
+  it('blocks Object.callv with non-literal method name', () => {
+    expect(evalLine('Object.callv(method_var, args)').effectiveTier).toBe(1);
+  });
+});
+
+describe('evaluateScript — Tier 2 DirAccess writes (smoke)', () => {
+  it('elicits on DirAccess.copy(...)', () => {
+    expect(evalLine('DirAccess.copy("a", "b")').effectiveTier).toBe(2);
+  });
+  it('elicits on DirAccess.rename(...)', () => {
+    expect(evalLine('DirAccess.rename("a", "b")').effectiveTier).toBe(2);
+  });
+  it('elicits on DirAccess.create_link(...)', () => {
+    expect(evalLine('DirAccess.create_link("a", "b")').effectiveTier).toBe(2);
+  });
+});
+
+describe('evaluateScript — Tier 2 network (smoke)', () => {
+  it('elicits on HTTPClient', () => {
+    expect(evalLine('var c = HTTPClient.new()').effectiveTier).toBe(2);
+  });
+  it('elicits on WebSocketPeer', () => {
+    expect(evalLine('var p = WebSocketPeer.new()').effectiveTier).toBe(2);
+  });
+  it('elicits on PacketPeerUDP', () => {
+    expect(evalLine('var p = PacketPeerUDP.new()').effectiveTier).toBe(2);
+  });
+  it('elicits on UDPServer', () => {
+    expect(evalLine('var s = UDPServer.new()').effectiveTier).toBe(2);
+  });
+  it('elicits on StreamPeerTLS', () => {
+    expect(evalLine('var s = StreamPeerTLS.new()').effectiveTier).toBe(2);
+  });
+  it('elicits on IP.resolve_hostname_addresses', () => {
+    expect(evalLine('IP.resolve_hostname_addresses("example.com")').effectiveTier).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bypass closure: Callable, OS/Engine/ClassDB/ProjectSettings.call, set_script
+// ---------------------------------------------------------------------------
+
+describe('evaluateScript — Tier 1 Callable bypass closure', () => {
+  it('blocks Callable(target, "method") as bare identifier', () => {
+    const d = evalLine('var c = Callable(self, "run")');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.reflection.Callable')).toBe(true);
+  });
+});
+
+describe('evaluateScript — Tier 1 per-singleton .call non-literal bypass closure', () => {
+  it('blocks OS.call with non-literal first arg', () => {
+    const d = evalLine('OS.call(method_var, "bash")');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.OS.call.nonliteral')).toBe(true);
+  });
+  it('blocks Engine.call with non-literal first arg', () => {
+    expect(evalLine('Engine.call(method_var, "x")').effectiveTier).toBe(1);
+  });
+  it('blocks ClassDB.call with non-literal first arg', () => {
+    expect(evalLine('ClassDB.call(method_var, "x")').effectiveTier).toBe(1);
+  });
+  it('blocks ProjectSettings.call with non-literal first arg', () => {
+    expect(evalLine('ProjectSettings.call(method_var, "x")').effectiveTier).toBe(1);
+  });
+});
+
+describe('evaluateScript — Tier 3 per-singleton .call literal arg', () => {
+  it('warns on OS.call with literal first arg', () => {
+    const d = evalLine('OS.call("get_name")');
+    expect(d.decision).toBe('warn');
+    expect(d.matches.some((m) => m.ruleId === 'tier3.literal.OS.call')).toBe(true);
+  });
+  it('warns on Engine.call with literal first arg', () => {
+    expect(evalLine('Engine.call("get_frames_drawn")').effectiveTier).toBe(3);
+  });
+  it('warns on ClassDB.call with literal first arg', () => {
+    expect(evalLine('ClassDB.call("get_class_list")').effectiveTier).toBe(3);
+  });
+  it('warns on ProjectSettings.call with literal first arg', () => {
+    expect(evalLine('ProjectSettings.call("get")').effectiveTier).toBe(3);
+  });
+});
+
+describe('evaluateScript — Tier 2 set_script bare identifier', () => {
+  it('elicits on set_script(...) called as bare identifier', () => {
+    const d = evalLine('set_script(some_node, my_script)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.reflection.set_script.bareIdentifier')).toBe(
+      true,
+    );
+  });
+});

@@ -231,6 +231,26 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'set_script attaches arbitrary code to a node',
     solutions: ['Attach scripts at scene-edit time via the attach_script MCP tool'],
   },
+  {
+    id: 'tier1.reflection.Callable',
+    tier: 1,
+    chain: ['Callable'],
+    matchAsBareIdentifier: true,
+    reason:
+      'Callable(target, "method") constructs runtime dynamic dispatch that bypasses static analysis',
+    solutions: ['Call the method directly by name instead of constructing a Callable'],
+  },
+  {
+    id: 'tier2.reflection.set_script.bareIdentifier',
+    tier: 2,
+    chain: ['set_script'],
+    matchAsBareIdentifier: true,
+    reason: 'set_script attaches arbitrary code to an object (receiver type not statically known)',
+    solutions: [
+      'Attach scripts at scene-edit time via the attach_script MCP tool',
+      'Rename the property if `set_script` is being used as a user-defined setter',
+    ],
+  },
 
   // ---- Tier 1: dynamic code ----
   {
@@ -322,6 +342,39 @@ export const policyRules: readonly PolicyRule[] = [
     argumentCheck: firstArgIsNonLiteral,
     reason: 'Object.callv with a non-literal method name is a dynamic dispatch',
     solutions: ['Call the method directly by name'],
+  },
+  {
+    id: 'tier1.indirect.OS.call.nonliteral',
+    tier: 1,
+    chain: ['OS', 'call'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'OS.call with a non-literal method name bypasses the OS.* allowlist',
+    solutions: ['Call the OS method directly by name'],
+  },
+  {
+    id: 'tier1.indirect.Engine.call.nonliteral',
+    tier: 1,
+    chain: ['Engine', 'call'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'Engine.call with a non-literal method name bypasses the Engine.* allowlist',
+    solutions: ['Call the Engine method directly by name'],
+  },
+  {
+    id: 'tier1.indirect.ClassDB.call.nonliteral',
+    tier: 1,
+    chain: ['ClassDB', 'call'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason: 'ClassDB.call with a non-literal method name bypasses the ClassDB.* allowlist',
+    solutions: ['Call the ClassDB method directly by name'],
+  },
+  {
+    id: 'tier1.indirect.ProjectSettings.call.nonliteral',
+    tier: 1,
+    chain: ['ProjectSettings', 'call'],
+    argumentCheck: firstArgIsNonLiteral,
+    reason:
+      'ProjectSettings.call with a non-literal method name bypasses the ProjectSettings.* allowlist',
+    solutions: ['Call the ProjectSettings method directly by name'],
   },
 
   // ---- Tier 2: filesystem writes ----
@@ -481,6 +534,38 @@ export const policyRules: readonly PolicyRule[] = [
     argumentCheck: firstArgIsLiteralString,
     reason: 'Object.call with a literal method name',
     solutions: ['Consider calling the method directly'],
+  },
+  {
+    id: 'tier3.literal.OS.call',
+    tier: 3,
+    chain: ['OS', 'call'],
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'OS.call with a literal method name',
+    solutions: ['Consider calling the OS method directly'],
+  },
+  {
+    id: 'tier3.literal.Engine.call',
+    tier: 3,
+    chain: ['Engine', 'call'],
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'Engine.call with a literal method name',
+    solutions: ['Consider calling the Engine method directly'],
+  },
+  {
+    id: 'tier3.literal.ClassDB.call',
+    tier: 3,
+    chain: ['ClassDB', 'call'],
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'ClassDB.call with a literal method name',
+    solutions: ['Consider calling the ClassDB method directly'],
+  },
+  {
+    id: 'tier3.literal.ProjectSettings.call',
+    tier: 3,
+    chain: ['ProjectSettings', 'call'],
+    argumentCheck: firstArgIsLiteralString,
+    reason: 'ProjectSettings.call with a literal method name',
+    solutions: ['Consider calling the ProjectSettings method directly'],
   },
   {
     id: 'tier3.os_alert',

@@ -113,7 +113,6 @@ describe('add_node round-trip', () => {
       // headless ops MUST NOT emit a "added successfully" line.
       const originalTscn = readFileSync(join(tmpProject, 'main.tscn'), 'utf8');
 
-      let threw = false;
       let stdoutSeen = '';
       let stderrSeen = '';
       try {
@@ -131,14 +130,12 @@ describe('add_node round-trip', () => {
         stdoutSeen = stdout || '';
         stderrSeen = stderr || '';
       } catch (err) {
-        threw = true;
         stderrSeen = err instanceof Error ? err.message : String(err);
       }
 
       // Either the runner rejected, or it returned stdout the handler would
       // classify as failure (no "added successfully" marker).
       expect(stdoutSeen).not.toContain('added successfully');
-      expect(threw || !stdoutSeen.includes('added successfully')).toBe(true);
       // The Godot side should have reported the parent-not-found error to stderr.
       expect(stderrSeen.toLowerCase()).toContain('parent node not found');
 

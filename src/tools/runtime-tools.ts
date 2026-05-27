@@ -20,7 +20,12 @@ import {
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
-import { createNullContext, type McpContext, type ElicitorResult } from '../utils/mcp-context.js';
+import {
+  createNullContext,
+  normalizeProjectKey,
+  type McpContext,
+  type ElicitorResult,
+} from '../utils/mcp-context.js';
 import {
   evaluateScript,
   matchesToWarnings,
@@ -520,7 +525,14 @@ function writeAuditSidecar(
   strictMode: boolean,
 ): void {
   try {
-    const scriptsDir = join(projectPath, '.mcp', 'scripts');
+    const projectRoot = resolve(projectPath);
+    const scriptsDir = resolve(join(projectRoot, '.mcp', 'scripts'));
+    if (!isUnderDir(projectRoot, scriptsDir)) {
+      logDebug(
+        `Sidecar write skipped: resolved script dir ${scriptsDir} escapes projectRoot ${projectRoot}`,
+      );
+      return;
+    }
     mkdirSync(scriptsDir, { recursive: true });
     const baseName = `${Date.now()}-${randomUUID()}`;
     const scriptFile = join(scriptsDir, `${baseName}.gd`);
@@ -794,7 +806,8 @@ export async function handleRunProject(
   // Session-confirmation gate: one elicitation per absolute projectPath per
   // server session. Skipped when an active runtime session already targets
   // the same project (the user just attached/ran).
-  if (!ctx.sessionState.runProjectConfirmed.has(absProjectPath)) {
+  const projectKey = normalizeProjectKey(absProjectPath);
+  if (!ctx.sessionState.runProjectConfirmed.has(projectKey)) {
     let elicitResult: ElicitorResult;
     try {
       elicitResult = await ctx.elicitor({
@@ -809,11 +822,21 @@ export async function handleRunProject(
         },
       });
     } catch (error) {
+      const elicitMsg = `Elicitation unavailable (${getErrorMessage(error)})`;
+      if (ctx.strictMode) {
+        return err(
+          createErrorResponse(
+            `${elicitMsg}; strict mode refuses to launch without explicit user confirmation.`,
+            [
+              'Unset GODOT_MCP_STRICT to launch without confirmation',
+              'Use an MCP client that supports elicitation',
+            ],
+          ),
+        );
+      }
       // Elicitation unsupported — fall through with a recorded warning. The
       // tiered scan above is the real security boundary; the gate is UX.
-      scanWarnings.push(
-        `Elicitation unavailable (${getErrorMessage(error)}); launching without explicit user confirmation.`,
-      );
+      scanWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
       elicitResult = { action: 'accept', content: { confirm: true } };
     }
     if (!isElicitAccepted(elicitResult)) {
@@ -823,7 +846,7 @@ export async function handleRunProject(
         ]),
       );
     }
-    ctx.sessionState.runProjectConfirmed.add(absProjectPath);
+    ctx.sessionState.runProjectConfirmed.add(projectKey);
   }
 
   if (!runner.getGodotPath()) {

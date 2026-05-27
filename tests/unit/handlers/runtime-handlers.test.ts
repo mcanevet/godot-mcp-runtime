@@ -90,6 +90,9 @@ interface RuntimeFake {
   setGodotPath(path: string): void;
   setBridgeReady(ready: boolean, error?: string): void;
   setRunProjectError(error: Error | null): void;
+  /** Hook called after runProject sets session state but before returning. */
+  setRunProjectAfterHook(hook: ((projectPath: string) => void) | null): void;
+  setStopProjectError(error: Error | null): void;
 }
 
 function createRuntimeFake(): RuntimeFake {
@@ -105,6 +108,8 @@ function createRuntimeFake(): RuntimeFake {
   let bridgeReady = true;
   let bridgeError: string | undefined;
   let runProjectError: Error | null = null;
+  let stopProjectError: Error | null = null;
+  let runProjectAfterHook: ((projectPath: string) => void) | null = null;
   let stopCallCount = 0;
 
   const state: {
@@ -137,6 +142,7 @@ function createRuntimeFake(): RuntimeFake {
     },
     async stopProject() {
       stopCallCount++;
+      if (stopProjectError) throw stopProjectError;
       // Bridge-failure paths in handleRunProject tear down the session before
       // returning the error, so reset the mode/project state to mirror the
       // real runner's stopProject behavior.
@@ -168,6 +174,7 @@ function createRuntimeFake(): RuntimeFake {
       state.activeProjectPath = projectPath;
       state.activeProcess = makeRunningProcess();
       fake.activeBridgePort = bridgePort ?? 19900;
+      if (runProjectAfterHook) runProjectAfterHook(projectPath);
     },
     async attachProject(projectPath: string, bridgePort?: number) {
       state.activeSessionMode = 'attached';
@@ -215,6 +222,12 @@ function createRuntimeFake(): RuntimeFake {
     },
     setRunProjectError(error: Error | null) {
       runProjectError = error;
+    },
+    setRunProjectAfterHook(hook) {
+      runProjectAfterHook = hook;
+    },
+    setStopProjectError(error: Error | null) {
+      stopProjectError = error;
     },
   };
 }
@@ -299,35 +312,22 @@ describe('handleRunProject validation', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(false, 'Process exited with code 1');
-    let stopCalled = false;
-    const runner = fake.asRunner;
-    const originalStop = runner.stopProject.bind(runner);
-    (runner as unknown as Record<string, unknown>).stopProject = async () => {
-      stopCalled = true;
-      return originalStop();
-    };
     // runProject sets activeProcess to a running process; override it to an
     // exited process after the call so waitForBridge sees the early exit.
-    const origRun = runner.runProject.bind(runner);
-    (runner as unknown as Record<string, unknown>).runProject = (
-      pp: string,
-      s?: string,
-      b?: boolean,
-    ) => {
-      origRun(pp, s, b);
+    fake.setRunProjectAfterHook((pp) => {
       fake.setSession({
         mode: 'spawned',
         projectPath: pp,
         process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
       });
-    };
+    });
     const result = await handleRunProject(
-      runner,
+      fake.asRunner,
       { projectPath: fixtureProjectPath },
       acceptingContext(),
     );
     expectErrorMatching(result, /exited before.*bridge/i);
-    expect(stopCalled).toBe(true);
+    expect(fake.stopCalls()).toBe(1);
   });
 });
 
@@ -366,18 +366,16 @@ describe('handleRunProject bridge failure paths', () => {
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
     fake.setBridgeReady(false, 'process gone');
-    // Replace the default runProject so the post-state has hasExited=true.
-    // The handler must take the "process exited" branch (not the timeout
-    // branch) and tear down before returning.
-    const runProjectExited = (projectPath: string): unknown => {
+    // After runProject sets the session, mark the process as already exited
+    // so the handler takes the "process exited" branch (not the timeout
+    // branch) and tears down before returning.
+    fake.setRunProjectAfterHook((projectPath) => {
       fake.setSession({
         mode: 'spawned',
         projectPath,
         process: makeRunningProcess({ hasExited: true, exitCode: 1 }),
       });
-      return undefined;
-    };
-    (fake.asRunner as unknown as { runProject: unknown }).runProject = runProjectExited;
+    });
     const result = await handleRunProject(
       fake.asRunner,
       { projectPath: fixtureProjectPath },
@@ -949,6 +947,13 @@ describe('handleRunScript security policy', () => {
     expect(fake.bridgeCalls).toHaveLength(1);
     const parsed = JSON.parse(unwrap(result).content[0].text);
     expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
+    // Sidecar must record elicit_accepted distinctly from a plain warn.
+    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    expect(sidecarFile).toBeDefined();
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('elicit_accepted');
+    expect(sidecar.tier).toBe(2);
   });
 
   it('rejects Tier 2 on decline without reaching the bridge', async () => {
@@ -972,6 +977,22 @@ describe('handleRunScript security policy', () => {
       makeContext({ elicit: throwingElicitor }),
     );
     expectErrorMatching(result, /Elicitation unavailable/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+    // Sidecar must record elicit_denied even on throw, preserving the audit trail.
+    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    expect(sidecarFile).toBeDefined();
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('elicit_denied');
+  });
+
+  it('denies Tier 2 when invoked with no ctx (default null context auto-declines)', async () => {
+    const dir = tmp.makeProject('run-script-tier2-nullctx-');
+    const fake = activeFake(dir);
+    // No context passed — handler builds its own null context whose elicitor
+    // auto-declines. Must produce a "User declined" error without crashing.
+    const result = await handleRunScript(fake.asRunner, { script: TIER2_SCRIPT });
+    expectErrorMatching(result, /User declined.*HTTPRequest/);
     expect(fake.bridgeCalls).toHaveLength(0);
   });
 
@@ -1124,6 +1145,20 @@ describe('handleRunProject security pre-flight', () => {
       makeContext({ elicit: declineElicitor }),
     );
     expectErrorMatching(result, /User declined run_project/);
+  });
+
+  it('strict mode refuses launch when elicitor throws (no silent fallback)', async () => {
+    const dir = tmp.makeProject('run-project-strict-elicitor-throw-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: throwingElicitor, strict: true }),
+    );
+    expectErrorMatching(result, /Elicitation unavailable/);
+    expectErrorMatching(result, /strict mode refuses to launch/);
   });
 
   it('scans the launched scene resolved from run/main_scene', async () => {

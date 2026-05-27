@@ -51,6 +51,16 @@ export interface McpContext {
 }
 
 /**
+ * Normalize an absolute project path for use as a key in `runProjectConfirmed`.
+ * Windows paths are case-insensitive at the filesystem level, so two calls with
+ * `D:\proj` and `d:\proj` would otherwise be treated as distinct projects and
+ * each trigger their own elicitation. Lowercasing on win32 collapses them.
+ */
+export function normalizeProjectKey(absPath: string): string {
+  return process.platform === 'win32' ? absPath.toLowerCase() : absPath;
+}
+
+/**
  * Build a no-op context for test call sites. The elicitor always declines —
  * tests that need an accept path should construct their own context with a
  * scripted elicitor instead.

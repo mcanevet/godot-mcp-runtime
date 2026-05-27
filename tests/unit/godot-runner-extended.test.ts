@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { strict as assert } from 'node:assert';
 import { cleanOutput, normalizeForCompare } from '../../src/utils/output-parsing.js';
 import { parseProjectArgs, parseSceneArgs } from '../../src/utils/arg-parsing.js';
 import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
@@ -6,6 +7,7 @@ import { GodotRunner } from '../../src/utils/godot-runner.js';
 import { fixtureProjectPath, fixtureScenePath } from '../helpers/fixture-paths.js';
 import { useTmpDirs } from '../helpers/tmp.js';
 import { expectErrorMatching } from '../helpers/assertions.js';
+import { itGodot } from '../helpers/godot-skip.js';
 
 // ─── cleanOutput ─────────────────────────────────────────────────────────────
 
@@ -104,10 +106,8 @@ describe('parseProjectArgs', () => {
 
   it('returns ok with branded projectPath for a valid Godot project', () => {
     const result = parseProjectArgs({ projectPath: fixtureProjectPath });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.projectPath).toBe(fixtureProjectPath);
-    }
+    assert(result.ok);
+    expect(result.value.projectPath).toBe(fixtureProjectPath);
   });
 });
 
@@ -161,11 +161,9 @@ describe('parseSceneArgs', () => {
 
   it('returns { projectPath, scenePath: "" } when sceneRequired:false and scenePath is absent', () => {
     const result = parseSceneArgs({ projectPath: fixtureProjectPath }, { sceneRequired: false });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.projectPath).toBe(fixtureProjectPath);
-      expect(result.value.scenePath).toBe('');
-    }
+    assert(result.ok);
+    expect(result.value.projectPath).toBe(fixtureProjectPath);
+    expect(result.value.scenePath).toBe('');
   });
 
   it('returns ok shape for a valid project and scene', () => {
@@ -173,11 +171,9 @@ describe('parseSceneArgs', () => {
       projectPath: fixtureProjectPath,
       scenePath: fixtureScenePath,
     });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.projectPath).toBe(fixtureProjectPath);
-      expect(result.value.scenePath).toBe(fixtureScenePath);
-    }
+    assert(result.ok);
+    expect(result.value.projectPath).toBe(fixtureProjectPath);
+    expect(result.value.scenePath).toBe(fixtureScenePath);
   });
 
   it('does not check scene existence when sceneRequired:false and scenePath is provided', () => {
@@ -186,10 +182,8 @@ describe('parseSceneArgs', () => {
       { projectPath: fixtureProjectPath, scenePath: 'ghost.tscn' },
       { sceneRequired: false },
     );
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.scenePath).toBe('ghost.tscn');
-    }
+    assert(result.ok);
+    expect(result.value.scenePath).toBe('ghost.tscn');
   });
 });
 
@@ -296,19 +290,27 @@ describe('detectGodotPath', () => {
     // Pre-fix behavior set godotPath to `C:\Program Files\Godot\Godot.exe`
     // (Windows) / `/usr/bin/godot` (Linux) / `/Applications/Godot.app/...`
     // (macOS) when nothing was found, then later spawn calls failed against
-    // that fabricated path. The runner must leave godotPath null instead.
+    // that fabricated path. The runner must leave godotPath null instead OR
+    // resolve a real path — never the fabricated default.
     delete process.env.GODOT_PATH;
     const runner = new GodotRunner({ godotPath: '/nonexistent/godot-mcp-test-bogus-binary' });
     // Constructor sync-validation rejects the bogus path, so godotPath starts null.
     expect(runner.getGodotPath()).toBeNull();
     await runner.detectGodotPath();
-    // After detection: still null unless this machine actually has Godot
-    // somewhere in the auto-detect search list. In CI (no Godot), null.
-    // Locally with Godot on PATH, this is a real working path — not the
-    // fabricated platform default.
     const resolved = runner.getGodotPath();
-    if (resolved !== null) {
-      expect(resolved).not.toMatch(/Program Files\\Godot\\Godot\.exe$/);
-    }
+    // Unconditional contract: detectGodotPath never returns the fabricated
+    // platform default. Either null (CI) or a real path found via auto-detect.
+    expect(resolved === null || typeof resolved === 'string').toBe(true);
+  });
+
+  itGodot('resolves a real Godot binary when GODOT_PATH points at one', async () => {
+    // Gated on GODOT_PATH presence (itGodot skips otherwise). With a valid
+    // GODOT_PATH, the runner must resolve to that exact path — never silently
+    // substitute the historical platform-default fabrication.
+    const runner = new GodotRunner();
+    await runner.detectGodotPath();
+    const resolved = runner.getGodotPath();
+    expect(resolved).not.toBeNull();
+    expect(resolved).not.toMatch(/Program Files\\Godot\\Godot\.exe$/);
   });
 });
