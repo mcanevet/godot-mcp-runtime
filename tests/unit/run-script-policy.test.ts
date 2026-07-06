@@ -424,6 +424,33 @@ describe('evaluateScript — whole-first-argument classification', () => {
   });
 });
 
+describe('evaluateScript — generic non-literal .call/.callv on any receiver', () => {
+  it('elicits on some_node.call(method_var) — arbitrary receiver, non-literal', () => {
+    const d = evalLine('some_node.call(method_var)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.generic.call.nonliteral')).toBe(true);
+  });
+
+  it('elicits on some_node.callv(method_var, args) — arbitrary receiver, non-literal', () => {
+    const d = evalLine('some_node.callv(method_var, args)');
+    expect(d.decision).toBe('elicit_required');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.generic.callv.nonliteral')).toBe(true);
+  });
+
+  it('does not match some_node.call("ready") — literal argument', () => {
+    const d = evalLine('some_node.call("ready")');
+    expect(d.matches.some((m) => m.ruleId === 'tier2.generic.call.nonliteral')).toBe(false);
+    expect(d.decision).toBe('ok');
+  });
+
+  it('still hard_blocks Object.call(var) via the named rule, not the generic one', () => {
+    const d = evalLine('Object.call(method_var)');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.Object.call.nonliteral')).toBe(true);
+    expect(d.matches.some((m) => m.ruleId === 'tier2.generic.call.nonliteral')).toBe(false);
+  });
+});
+
 describe('evaluateScript — Tier 2 set_script bare identifier', () => {
   it('elicits on set_script(...) called as bare identifier', () => {
     const d = evalLine('set_script(some_node, my_script)');

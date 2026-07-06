@@ -73,6 +73,14 @@ interface PolicyRule {
    * `load`, `preload`, `str_to_var`, `bytes_to_var_with_objects`.
    */
   matchAsBareIdentifier?: boolean;
+  /**
+   * Optional: match when `chain`'s single segment appears as the *last*
+   * segment of any member chain of length >= 2, rather than as a prefix.
+   * Used for the generic non-literal `.call`/`.callv` rule, which must fire
+   * on any receiver (`some_node.call(var)`), not just the named singletons
+   * that already have dedicated prefix rules above it in the table.
+   */
+  matchLastSegment?: boolean;
   reason: string;
   solutions: string[];
 }
@@ -623,6 +631,36 @@ export const policyRules: readonly PolicyRule[] = [
     reason: 'OS.alert opens a modal dialog and blocks the project',
     solutions: ['Remove the OS.alert call if running headlessly'],
   },
+
+  // ---- Tier 2: generic non-literal .call/.callv (any receiver) ----
+  // Placed after every named-receiver .call/.callv rule above (per-token
+  // first-match-wins, so Object.call(var) still fires the more specific
+  // Tier 1 rule ahead of this one). Tier 2, not Tier 1: plenty of benign code
+  // does `some_callable.call(...)`, and over-blocking here would train
+  // reflexive elicitation approval.
+  {
+    id: 'tier2.generic.call.nonliteral',
+    tier: 2,
+    chain: ['call'],
+    matchLastSegment: true,
+    argumentKind: 'nonliteral',
+    reason:
+      'A non-literal .call on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
+    solutions: [
+      'Call the method directly by name',
+      'If the receiver is OS/Engine/ClassDB/ProjectSettings/Object, that dedicated rule already governs this call',
+    ],
+  },
+  {
+    id: 'tier2.generic.callv.nonliteral',
+    tier: 2,
+    chain: ['callv'],
+    matchLastSegment: true,
+    argumentKind: 'nonliteral',
+    reason:
+      'A non-literal .callv on an arbitrary receiver is dynamic dispatch that bypasses static analysis',
+    solutions: ['Call the method directly by name'],
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -645,6 +683,10 @@ function indexOfOpenParen(tokens: readonly Token[], i: number): number {
 }
 
 function tokenMatchesRule(tok: Token, rule: PolicyRule): boolean {
+  if (rule.matchLastSegment) {
+    if (tok.kind !== 'memberChain' || !tok.chain || tok.chain.length < 2) return false;
+    return tok.chain[tok.chain.length - 1] === rule.chain[0];
+  }
   if (rule.matchAsBareIdentifier && rule.chain.length === 1 && tok.kind === 'identifier') {
     return tok.text === rule.chain[0];
   }
