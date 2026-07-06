@@ -1,4 +1,4 @@
-# Contributing to godot-mcp-runtime
+# Contributing to Godot MCP Runtime
 
 Thanks for contributing. This guide covers what you need to make a clean PR.
 

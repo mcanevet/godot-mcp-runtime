@@ -1,6 +1,6 @@
 # Tool Authoring Standards
 
-Standards for adding or modifying MCP tools in `godot-mcp-runtime`. Every tool ships on every client handshake — its description, schema, and annotations are the entire interface an LLM agent has to work with. Treat them like a UI, not an API doc.
+Standards for adding or modifying MCP tools in Godot MCP Runtime. Every tool ships on every client handshake — its description, schema, and annotations are the entire interface an LLM agent has to work with. Treat them like a UI, not an API doc.
 
 If you change anything in `src/tools/*.ts`, work this checklist.
 

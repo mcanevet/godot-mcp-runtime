@@ -1,6 +1,6 @@
 # Tools
 
-The full MCP tool reference for `godot-mcp-runtime`. This file always reflects `main`; for older releases, browse the corresponding git tag.
+The full MCP tool reference for Godot MCP Runtime. This file always reflects `main`; for older releases, browse the corresponding git tag.
 
 ## Project Management
 
