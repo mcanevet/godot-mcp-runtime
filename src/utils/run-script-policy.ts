@@ -47,10 +47,13 @@ export interface PolicyDecision {
 
 /**
  * A rule matches when the tokenizer emits a `memberChain` whose `chain`
- * array starts with `chain` (exact prefix match). `argumentCheck` may further
- * narrow the match by inspecting the token immediately following a `(`
- * — used to distinguish `load("res://foo")` (literal, Tier 3) from
- * `load(some_var)` (non-literal, Tier 1).
+ * array starts with `chain` (exact prefix match). `argumentKind` may further
+ * narrow the match by classifying the call's *whole* first argument — used
+ * to distinguish `load("res://foo")` (literal, Tier 3) from `load(some_var)`
+ * or `load("res://" + evil)` (non-literal, Tier 1). See
+ * `classifyFirstArgument` — classification looks at everything up to the
+ * next top-level `,` or `)`, not just the first token, so `"a" + b` is
+ * correctly non-literal rather than mistaken for the literal `"a"`.
  */
 interface PolicyRule {
   id: string;
@@ -58,12 +61,12 @@ interface PolicyRule {
   /** Member chain that must appear as a prefix. e.g. ['OS','execute']. */
   chain: readonly string[];
   /**
-   * Optional refinement applied to the call's first argument token. Receives
-   * the first non-whitespace token after the opening paren, or `null` if no
-   * paren follows. Returns true to keep the match. If absent, any context
-   * matches.
+   * Optional: require the call's whole first argument to classify as
+   * 'literal' (a lone string token) or 'nonliteral' (anything else — an
+   * identifier, an expression, multiple tokens). A no-argument call
+   * ('none') never matches either kind. If absent, any context matches.
    */
-  argumentCheck?: (firstArg: Token | null) => boolean;
+  argumentKind?: 'literal' | 'nonliteral';
   /**
    * Optional: also fire when the chain appears as a bare identifier (e.g.
    * `load(...)` rather than `Foo.load(...)`). Used for the global functions
@@ -75,19 +78,65 @@ interface PolicyRule {
 }
 
 // ---------------------------------------------------------------------------
-// Argument checks
+// Argument classification
 // ---------------------------------------------------------------------------
 
-function firstArgIsLiteralString(t: Token | null): boolean {
-  return t !== null && t.kind === 'string';
-}
+export type ArgumentClassification = 'literal' | 'nonliteral' | 'none';
 
-function firstArgIsNonLiteral(t: Token | null): boolean {
-  // Non-literal first arg = anything other than a string literal. A call with
-  // no arguments (`firstArg === null` — the next token is the closing paren)
-  // is NOT a non-literal call; we don't want to fire on `load()`.
-  if (t === null) return false;
-  return t.kind !== 'string';
+/**
+ * Classify a call's whole first argument, not just its first token — so
+ * `load("res://" + evil_var)` is correctly 'nonliteral' instead of matching
+ * on the leading string literal alone.
+ *
+ * Scans from `openParenIndex + 1`, tracking bracket depth so nested
+ * `(...)`/`[...]` in the first argument (e.g. `foo(bar(x), y)`) don't
+ * mistake an inner terminator for the outer one. A top-level `,` or `)` ends
+ * the argument. Newline tokens are skipped (they carry no argument content).
+ *
+ * - Zero collected tokens → 'none' (a no-arg call — must not match a
+ *   non-literal rule, preserving "don't fire on load()").
+ * - Exactly one collected token and it is a string literal → 'literal'.
+ * - Anything else (an identifier, an operator, multiple tokens) → 'nonliteral'.
+ */
+export function classifyFirstArgument(
+  tokens: readonly Token[],
+  openParenIndex: number,
+): ArgumentClassification {
+  let depth = 0;
+  const collected: Token[] = [];
+
+  for (let j = openParenIndex + 1; j < tokens.length; j++) {
+    const tok = tokens[j]!;
+    if (tok.kind === 'newline') continue;
+
+    if (tok.kind === 'punct') {
+      if (tok.text === '(' || tok.text === '[') {
+        depth++;
+        collected.push(tok);
+        continue;
+      }
+      if (tok.text === ')') {
+        if (depth === 0) break; // terminator: end of the call
+        depth--;
+        collected.push(tok);
+        continue;
+      }
+      if (tok.text === ']') {
+        if (depth > 0) depth--;
+        collected.push(tok);
+        continue;
+      }
+      if (tok.text === ',' && depth === 0) {
+        break; // terminator: end of the first argument
+      }
+    }
+
+    collected.push(tok);
+  }
+
+  if (collected.length === 0) return 'none';
+  if (collected.length === 1 && collected[0]!.kind === 'string') return 'literal';
+  return 'nonliteral';
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +355,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['load'],
     matchAsBareIdentifier: true,
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'load() with a non-literal path can be redirected to any resource',
     solutions: ['Pass a literal `res://...` path string to load()'],
   },
@@ -315,7 +364,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 1,
     chain: ['preload'],
     matchAsBareIdentifier: true,
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'preload() with a non-literal path can be redirected',
     solutions: ['Pass a literal `res://...` path string to preload()'],
   },
@@ -323,7 +372,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.ResourceLoader.load.nonliteral',
     tier: 1,
     chain: ['ResourceLoader', 'load'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'ResourceLoader.load with a non-literal path can be redirected',
     solutions: ['Pass a literal `res://...` path to ResourceLoader.load'],
   },
@@ -331,7 +380,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.Object.call.nonliteral',
     tier: 1,
     chain: ['Object', 'call'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'Object.call with a non-literal method name is a dynamic dispatch',
     solutions: ['Call the method directly by name'],
   },
@@ -339,7 +388,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.Object.callv.nonliteral',
     tier: 1,
     chain: ['Object', 'callv'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'Object.callv with a non-literal method name is a dynamic dispatch',
     solutions: ['Call the method directly by name'],
   },
@@ -347,7 +396,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.OS.call.nonliteral',
     tier: 1,
     chain: ['OS', 'call'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'OS.call with a non-literal method name bypasses the OS.* allowlist',
     solutions: ['Call the OS method directly by name'],
   },
@@ -355,7 +404,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.Engine.call.nonliteral',
     tier: 1,
     chain: ['Engine', 'call'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'Engine.call with a non-literal method name bypasses the Engine.* allowlist',
     solutions: ['Call the Engine method directly by name'],
   },
@@ -363,7 +412,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.ClassDB.call.nonliteral',
     tier: 1,
     chain: ['ClassDB', 'call'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason: 'ClassDB.call with a non-literal method name bypasses the ClassDB.* allowlist',
     solutions: ['Call the ClassDB method directly by name'],
   },
@@ -371,7 +420,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier1.indirect.ProjectSettings.call.nonliteral',
     tier: 1,
     chain: ['ProjectSettings', 'call'],
-    argumentCheck: firstArgIsNonLiteral,
+    argumentKind: 'nonliteral',
     reason:
       'ProjectSettings.call with a non-literal method name bypasses the ProjectSettings.* allowlist',
     solutions: ['Call the ProjectSettings method directly by name'],
@@ -506,7 +555,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 3,
     chain: ['load'],
     matchAsBareIdentifier: true,
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'load() with a literal path can run _init code in the loaded resource',
     solutions: ['Verify the resource path is trusted'],
   },
@@ -515,7 +564,7 @@ export const policyRules: readonly PolicyRule[] = [
     tier: 3,
     chain: ['preload'],
     matchAsBareIdentifier: true,
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'preload() with a literal path can run _init code in the loaded resource',
     solutions: ['Verify the resource path is trusted'],
   },
@@ -523,7 +572,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier3.literal.ResourceLoader.load',
     tier: 3,
     chain: ['ResourceLoader', 'load'],
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'ResourceLoader.load with a literal path can run _init code',
     solutions: ['Verify the resource path is trusted'],
   },
@@ -531,7 +580,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier3.literal.Object.call',
     tier: 3,
     chain: ['Object', 'call'],
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'Object.call with a literal method name',
     solutions: ['Consider calling the method directly'],
   },
@@ -539,7 +588,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier3.literal.OS.call',
     tier: 3,
     chain: ['OS', 'call'],
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'OS.call with a literal method name',
     solutions: ['Consider calling the OS method directly'],
   },
@@ -547,7 +596,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier3.literal.Engine.call',
     tier: 3,
     chain: ['Engine', 'call'],
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'Engine.call with a literal method name',
     solutions: ['Consider calling the Engine method directly'],
   },
@@ -555,7 +604,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier3.literal.ClassDB.call',
     tier: 3,
     chain: ['ClassDB', 'call'],
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'ClassDB.call with a literal method name',
     solutions: ['Consider calling the ClassDB method directly'],
   },
@@ -563,7 +612,7 @@ export const policyRules: readonly PolicyRule[] = [
     id: 'tier3.literal.ProjectSettings.call',
     tier: 3,
     chain: ['ProjectSettings', 'call'],
-    argumentCheck: firstArgIsLiteralString,
+    argumentKind: 'literal',
     reason: 'ProjectSettings.call with a literal method name',
     solutions: ['Consider calling the ProjectSettings method directly'],
   },
@@ -579,21 +628,6 @@ export const policyRules: readonly PolicyRule[] = [
 // ---------------------------------------------------------------------------
 // Evaluation
 // ---------------------------------------------------------------------------
-
-/**
- * Find the first non-whitespace, non-newline token AFTER position `from` in
- * `tokens`. Returns null if the next significant token is a `)` (no-arg call)
- * or if the end of the stream is reached.
- */
-function firstArgumentToken(tokens: readonly Token[], from: number): Token | null {
-  for (let j = from; j < tokens.length; j++) {
-    const tok = tokens[j]!;
-    if (tok.kind === 'newline') continue;
-    if (tok.kind === 'punct' && tok.text === ')') return null;
-    return tok;
-  }
-  return null;
-}
 
 /**
  * True when the token at index `i` is followed by a `(` (allowing newlines
@@ -644,15 +678,12 @@ export function evaluateScript(source: string, strict = false): PolicyDecision {
     for (const rule of policyRules) {
       if (!tokenMatchesRule(tok, rule)) continue;
 
-      let firstArg: Token | null = null;
       const openParen = indexOfOpenParen(tokens, i);
-      if (openParen !== -1) {
-        firstArg = firstArgumentToken(tokens, openParen + 1);
-      }
 
-      if (rule.argumentCheck) {
+      if (rule.argumentKind) {
         if (openParen === -1) continue;
-        if (!rule.argumentCheck(firstArg)) continue;
+        const classification = classifyFirstArgument(tokens, openParen);
+        if (classification !== rule.argumentKind) continue;
       }
 
       let effectiveTier: Tier = rule.tier;

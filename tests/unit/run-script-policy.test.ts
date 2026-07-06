@@ -387,6 +387,43 @@ describe('evaluateScript — member chain whitespace/newline skeleton key', () =
   });
 });
 
+describe('evaluateScript — whole-first-argument classification', () => {
+  // Regression coverage: classification used to look only at the first
+  // token after `(`, so `load("res://" + evil)` saw the leading string
+  // literal and dropped from Tier 1 (non-literal) to Tier 3 (warn).
+  it('blocks load("res://" + x) as non-literal, not warn', () => {
+    const d = evalLine('var r = load("res://" + x)');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
+    expect(d.matches.some((m) => m.ruleId === 'tier3.literal.load')).toBe(false);
+  });
+
+  it('blocks obj.call("exec" + "ute") as non-literal, not the literal Tier 3 rule', () => {
+    const d = evalLine('Object.call("exec" + "ute")');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.Object.call.nonliteral')).toBe(true);
+    expect(d.matches.some((m) => m.ruleId === 'tier3.literal.Object.call')).toBe(false);
+  });
+
+  it('regression: lone-literal load("res://main.tscn") stays warn', () => {
+    const d = evalLine('var r = load("res://main.tscn")');
+    expect(d.decision).toBe('warn');
+    expect(d.matches.some((m) => m.ruleId === 'tier3.literal.load')).toBe(true);
+  });
+
+  it('regression: load(some_var) stays hard_block', () => {
+    const d = evalLine('var r = load(some_var)');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(true);
+  });
+
+  it('regression: load() with no argument does not match the non-literal rule', () => {
+    const d = evalLine('var r = load()');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.indirect.load.nonliteral')).toBe(false);
+    expect(d.decision).toBe('ok');
+  });
+});
+
 describe('evaluateScript — Tier 2 set_script bare identifier', () => {
   it('elicits on set_script(...) called as bare identifier', () => {
     const d = evalLine('set_script(some_node, my_script)');
