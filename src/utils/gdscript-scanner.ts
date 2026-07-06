@@ -61,6 +61,44 @@ function isNodePathChar(ch: string): boolean {
 }
 
 /**
+ * Skip inline whitespace (space/tab) and newlines starting at `pos`, tracking
+ * line/lineStart across any newline crossed. Used by the member-chain builder
+ * to peek past whitespace/newlines around a `.` without committing to the
+ * skip unless the peek finds what it's looking for (see the identifier
+ * branch in `tokenize`).
+ */
+function skipWsAndNewlines(
+  source: string,
+  len: number,
+  pos: number,
+  line: number,
+  lineStart: number,
+): { pos: number; line: number; lineStart: number } {
+  while (pos < len) {
+    const c = source[pos];
+    if (c === ' ' || c === '\t') {
+      pos++;
+      continue;
+    }
+    if (c === '\n') {
+      pos++;
+      line++;
+      lineStart = pos;
+      continue;
+    }
+    if (c === '\r') {
+      pos++;
+      if (pos < len && source[pos] === '\n') pos++;
+      line++;
+      lineStart = pos;
+      continue;
+    }
+    break;
+  }
+  return { pos, line, lineStart };
+}
+
+/**
  * Tokens emitted by `tokenize`. Comments and string-literal contents are NOT
  * present — they are consumed silently. String literals as a whole are emitted
  * as a single `string` token so the policy can recognize "literal first
@@ -256,25 +294,35 @@ export function tokenize(source: string): Token[] {
       const first = source.slice(start, i);
       const chain: string[] = [first];
       let endText = first;
-      // Continue chain across `.identifier` segments. Allow whitespace and
-      // line continuations were already stripped earlier (the `\` + EOL
-      // branch above eats the EOL without emitting a newline).
-      while (i < len && source[i] === '.') {
-        const dotPos = i;
-        const j = i + 1;
-        if (j < len && isIdentStart(source[j]!)) {
-          // Consume the next identifier segment.
-          let k = j;
-          while (k < len && isIdentPart(source[k]!)) k++;
-          chain.push(source.slice(j, k));
-          endText += '.' + source.slice(j, k);
-          i = k;
-          continue;
-        }
-        // `.` not followed by identifier — break out, leaving the dot for
-        // the next iteration to emit as punct.
-        void dotPos;
-        break;
+      // Continue the chain across `.identifier` segments, tolerating
+      // whitespace and newlines both before and after the `.` — GDScript
+      // already treats `a\n.b` inside parens as `a.b`, and a tight
+      // "no whitespace" rule here was a skeleton key that let `OS .execute`,
+      // `OS. execute`, and `OS.\n  execute` bypass every two-segment rule in
+      // the policy table at once. Peek past whitespace/newlines for the `.`,
+      // then past whitespace/newlines after the `.` for the next identifier
+      // segment; only commit (advance i/line/lineStart) if both are found —
+      // on failure nothing has moved, so a genuine `foo\nbar` (two separate
+      // statements) still tokenizes as two identifiers and the skipped
+      // whitespace/newline is re-scanned normally by the outer loop.
+      while (i < len) {
+        const beforeDot = skipWsAndNewlines(source, len, i, line, lineStart);
+        if (beforeDot.pos >= len || source[beforeDot.pos] !== '.') break;
+        const afterDot = skipWsAndNewlines(
+          source,
+          len,
+          beforeDot.pos + 1,
+          beforeDot.line,
+          beforeDot.lineStart,
+        );
+        if (afterDot.pos >= len || !isIdentStart(source[afterDot.pos]!)) break;
+        let k = afterDot.pos;
+        while (k < len && isIdentPart(source[k]!)) k++;
+        chain.push(source.slice(afterDot.pos, k));
+        endText += '.' + source.slice(afterDot.pos, k);
+        i = k;
+        line = afterDot.line;
+        lineStart = afterDot.lineStart;
       }
       if (chain.length > 1) {
         tokens.push({

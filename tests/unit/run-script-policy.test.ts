@@ -357,6 +357,36 @@ describe('evaluateScript — Tier 3 per-singleton .call literal arg', () => {
   });
 });
 
+describe('evaluateScript — member chain whitespace/newline skeleton key', () => {
+  // Regression coverage: the tokenizer used to require the dot to sit
+  // immediately against both identifiers, so whitespace or a newline around
+  // the `.` dropped `execute` to a bare, unmatched identifier — silently
+  // defeating every OS.execute-style rule at once.
+  it('blocks OS .execute (space before the dot)', () => {
+    const d = evalLine('OS .execute("rm", ["-rf", "/"])');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.direct_exec.OS.execute')).toBe(true);
+  });
+
+  it('blocks OS. execute (space after the dot)', () => {
+    const d = evalLine('OS. execute("rm", ["-rf", "/"])');
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.direct_exec.OS.execute')).toBe(true);
+  });
+
+  it('blocks OS.\\n  execute (newline inside a call)', () => {
+    const source = VALID_PREFIX + 'foo(OS.\n\t\texecute("rm", ["-rf", "/"]))\n';
+    const d = evaluateScript(source);
+    expect(d.decision).toBe('hard_block');
+    expect(d.matches.some((m) => m.ruleId === 'tier1.direct_exec.OS.execute')).toBe(true);
+  });
+
+  it('does not merge two separate statements into a false chain', () => {
+    const source = VALID_PREFIX + 'var a = foo\n\tvar b = bar\n';
+    expect(evaluateScript(source).decision).toBe('ok');
+  });
+});
+
 describe('evaluateScript — Tier 2 set_script bare identifier', () => {
   it('elicits on set_script(...) called as bare identifier', () => {
     const d = evalLine('set_script(some_node, my_script)');

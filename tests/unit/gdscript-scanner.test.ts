@@ -117,6 +117,38 @@ describe('tokenize: line continuation', () => {
   });
 });
 
+describe('tokenize: member chains across whitespace/newlines', () => {
+  // Regression coverage for the skeleton-key bypass: a tight "no whitespace
+  // between identifier and dot" rule let `OS .execute`, `OS. execute`, and
+  // `OS.\n  execute` slip past every two-segment policy rule at once.
+  it('coalesces OS .execute (space before the dot)', () => {
+    expect(chains('OS .execute()\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('coalesces OS. execute (space after the dot)', () => {
+    expect(chains('OS. execute()\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('coalesces OS.\\n  execute (newline inside a call)', () => {
+    expect(chains('foo(OS.\n  execute())\n')).toEqual([['OS', 'execute']]);
+  });
+
+  it('does not merge two separate statements (foo\\nbar stays two identifiers)', () => {
+    expect(idents('foo\nbar\n')).toEqual(['foo', 'bar']);
+    expect(chains('foo\nbar\n')).toEqual([]);
+  });
+
+  it('tracks line numbers correctly across a chain split by a newline', () => {
+    const tokens = tokenize('var x = 1\nOS\n.execute()\n');
+    const chain = tokens.find((t) => t.kind === 'memberChain');
+    // Contract: the chain token's line stays that of the first segment.
+    expect(chain?.line).toBe(2);
+    // A token after the chain must resume line tracking correctly.
+    const closeParen = tokens.filter((t) => t.text === ')').pop();
+    expect(closeParen?.line).toBe(3);
+  });
+});
+
 describe('tokenize: punctuation', () => {
   it('emits ( ) , as punct tokens', () => {
     const tokens = tokenize('foo(a, b)\n');
