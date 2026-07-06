@@ -3,11 +3,12 @@ import { existsSync, readdirSync, readFileSync } from 'fs';
 import type { GodotRunner } from '../utils/godot-runner.js';
 import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.types.js';
 import { normalizeParameters } from '../utils/parameter-conversion.js';
-import { validatePath, validateSubPath, projectGodotPath } from '../utils/path-validation.js';
+import { validatePath, projectGodotPath } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
 import { createStructuredResponse } from '../utils/structured-response.js';
 import {
   parseProjectArgs,
+  parseSceneArgs,
   requireString,
   optionalString,
   optionalBoolean,
@@ -589,30 +590,11 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
 
 export async function handleGetSceneDependencies(args: OperationParams): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseProjectArgs(args);
+  const parsed = parseSceneArgs(args);
   if (!parsed.ok) return parsed;
 
-  const scenePath = requireString(args, 'scenePath');
-  if (!scenePath.ok) return scenePath;
-
-  if (!validateSubPath(parsed.value.projectPath, scenePath.value)) {
-    return err(
-      createErrorResponse('Invalid scenePath', [
-        'Provide a valid relative path without ".." that stays inside the project directory',
-      ]),
-    );
-  }
-
   try {
-    const sceneFullPath = join(parsed.value.projectPath, scenePath.value);
-    if (!existsSync(sceneFullPath)) {
-      return err(
-        createErrorResponse(`Scene file not found: ${scenePath.value}`, [
-          'Verify the path is relative to the project root',
-          'Use get_project_files to list available .tscn files',
-        ]),
-      );
-    }
+    const sceneFullPath = join(parsed.value.projectPath, parsed.value.scenePath);
     const sceneContent = readFileSync(sceneFullPath, 'utf8');
     const dependencies: Array<{ path: string; type: string; uid?: string }> = [];
     const extResourcePattern = /^\[ext_resource([^\]]*)\]/gm;
@@ -633,7 +615,7 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
       }
     }
     return createStructuredResponse({
-      scene: scenePath.value,
+      scene: parsed.value.scenePath,
       dependencies,
     });
   } catch (error: unknown) {
