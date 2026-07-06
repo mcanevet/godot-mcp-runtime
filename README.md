@@ -1,7 +1,7 @@
 # Godot MCP Runtime
 
 <p align="center">
-  <a href="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime"><img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-runtime-mcp/badge" alt="godot-runtime-mcp MCP server"></a>
+  <a href="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime"><img width="380" height="200" src="https://glama.ai/mcp/servers/@Erodenn/godot-mcp-runtime/badge" alt="godot-mcp-runtime MCP server"></a>
 </p>
 
 <p align="center">
@@ -33,6 +33,7 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 ## Contents
 
 - [What It Does](#what-it-does)
+- [How It Compares](#how-it-compares)
 - [Quick Start](#quick-start)
 - [Docs](#docs)
 - [Acknowledgments](#acknowledgments)
@@ -59,6 +60,21 @@ Think of it as [Playwright MCP](https://github.com/microsoft/playwright-mcp), bu
 > `get_debug_output` is unavailable in attached mode. stdout and stderr only flow through processes MCP started itself, so when Godot is launched externally there's no captured output to return. Use `run_project` if you need the debug stream.
 
 The bridge cleans itself up automatically when `stop_project` or `detach_project` is called. No leftover autoloads, no modified project files.
+
+## How It Compares
+
+The Godot MCP space splits on two axes: whether a server can drive a _running_ game (runtime) or only edit files, and what it costs your project to do so. Most servers that offer real runtime control ship as a Godot addon you install and commit to version control, or as a custom engine you download. This one injects a bridge transiently and removes it on shutdown, so you get full live-game control against stock Godot with nothing left in your repo.
+
+| Server                    | Live-game runtime                                          | Footprint                            | License                        | Price                 |
+| ------------------------- | ---------------------------------------------------------- | ------------------------------------ | ------------------------------ | --------------------- |
+| **godot-mcp-runtime**     | **Full**: screenshots, input, live scene tree, script exec | **Zero** (`npx`, no committed addon) | MIT                            | Free                  |
+| Summer Engine             | Full                                                       | Custom engine download + sign-in     | MIT layer / proprietary engine | Free core, paid cloud |
+| tugcantopaloglu/godot-mcp | Full                                                       | Committed autoload addon             | MIT                            | Free                  |
+| Godot MCP Pro             | Full                                                       | Committed editor addon               | Proprietary                    | $15                   |
+| GDAI MCP                  | Editor-mediated                                            | Committed editor addon               | Proprietary                    | $19                   |
+| Coding-Solo/godot-mcp     | No (launch + debug output)                                 | Zero (`npx`)                         | MIT                            | Free                  |
+
+Among servers with full live-game control, this is the only one with a zero-footprint install: no addon committed to version control, no custom engine, no account. It has shipped a runtime bridge since February 2026. For the full field of ten servers with a source for every claim, see [docs/comparison.md](docs/comparison.md).
 
 ## Quick Start
 
