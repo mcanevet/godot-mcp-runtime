@@ -11,6 +11,7 @@ import {
   stripResPrefix,
 } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
+import { createStructuredResponse } from '../utils/structured-response.js';
 import {
   parseProjectArgs,
   optionalString,
@@ -428,7 +429,6 @@ export const runtimeToolDefinitions = [
       properties: {
         success: { type: 'boolean' },
         result: {},
-        warning: { type: 'string' },
         warnings: { type: 'array', items: { type: 'string' } },
         tip: { type: 'string' },
       },
@@ -1082,16 +1082,9 @@ export async function handleDetachProject(runner: GodotRunner): Promise<HandlerR
 
   const result = (await runner.stopProject())!;
 
-  return ok({
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          message: 'Detached attached project and cleaned MCP bridge state',
-          externalProcessPreserved: result.externalProcessPreserved === true,
-        }),
-      },
-    ],
+  return createStructuredResponse({
+    message: 'Detached attached project and cleaned MCP bridge state',
+    externalProcessPreserved: result.externalProcessPreserved === true,
   });
 }
 
@@ -1111,19 +1104,12 @@ export function handleGetDebugOutput(
   }
 
   if (runner.activeSessionMode === 'attached') {
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            output: [],
-            errors: [],
-            running: null,
-            attached: true,
-            tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
-          }),
-        },
-      ],
+    return createStructuredResponse({
+      output: [],
+      errors: [],
+      running: null,
+      attached: true,
+      tip: 'Attached mode does not capture stdout/stderr because Godot was launched outside MCP.',
     });
   }
 
@@ -1156,14 +1142,7 @@ export function handleGetDebugOutput(
       'Process has exited. Call stop_project to clean up the process slot before starting a new one.';
   }
 
-  return ok({
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify(response),
-      },
-    ],
-  });
+  return createStructuredResponse(response);
 }
 
 export async function handleStopProject(runner: GodotRunner): Promise<HandlerResult> {
@@ -1178,22 +1157,15 @@ export async function handleStopProject(runner: GodotRunner): Promise<HandlerRes
     );
   }
 
-  return ok({
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          message:
-            result.mode === 'attached'
-              ? 'Attached project detached and MCP bridge state cleaned up'
-              : 'Godot project stopped',
-          mode: result.mode,
-          externalProcessPreserved: result.externalProcessPreserved === true,
-          finalOutput: result.output.slice(-200),
-          finalErrors: result.errors.slice(-200),
-        }),
-      },
-    ],
+  return createStructuredResponse({
+    message:
+      result.mode === 'attached'
+        ? 'Attached project detached and MCP bridge state cleaned up'
+        : 'Godot project stopped',
+    mode: result.mode,
+    externalProcessPreserved: result.externalProcessPreserved === true,
+    finalOutput: result.output.slice(-200),
+    finalErrors: result.errors.slice(-200),
   });
 }
 
@@ -1365,9 +1337,7 @@ export async function handleTakeScreenshot(
 
     attachRuntimeWarnings(metadata, runtimeErrors);
 
-    content.push({ type: 'text', text: JSON.stringify(metadata) });
-
-    return ok({ content });
+    return createStructuredResponse(metadata, content);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to take screenshot: ${getErrorMessage(error)}`, [
@@ -1444,14 +1414,7 @@ export async function handleSimulateInput(
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(payload),
-        },
-      ],
-    });
+    return createStructuredResponse(payload);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to simulate input: ${getErrorMessage(error)}`, [
@@ -1504,14 +1467,7 @@ export async function handleGetUiElements(
     };
     attachRuntimeWarnings(payload, runtimeErrors);
 
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(payload),
-        },
-      ],
-    });
+    return createStructuredResponse(payload);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to get UI elements: ${getErrorMessage(error)}`, [
@@ -1669,21 +1625,13 @@ export async function handleRunScript(
       const nullPayload: Record<string, unknown> = {
         success: true,
         result: null,
-        warning:
+        warnings: [
           'Script returned null. If unexpected, check get_debug_output for runtime errors — GDScript does not propagate exceptions.',
+          ...warningsFromPolicy,
+        ],
         tip: 'Call take_screenshot to verify any visual changes, or get_debug_output to review print() output from your script.',
       };
-      if (warningsFromPolicy.length > 0) {
-        nullPayload.warnings = warningsFromPolicy;
-      }
-      return ok({
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(nullPayload),
-          },
-        ],
-      });
+      return createStructuredResponse(nullPayload);
     }
 
     const payload: Record<string, unknown> = {
@@ -1696,14 +1644,7 @@ export async function handleRunScript(
       payload.warnings = combinedWarnings.slice(0, MAX_RUNTIME_ERROR_CONTEXT_LINES);
     }
 
-    return ok({
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(payload),
-        },
-      ],
-    });
+    return createStructuredResponse(payload);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to execute script: ${getErrorMessage(error)}`, [

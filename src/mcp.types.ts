@@ -39,6 +39,7 @@ export interface ToolDefinition {
 export interface ToolResponse {
   content: Array<{ type: string; text?: string; [k: string]: unknown }>;
   isError?: boolean;
+  structuredContent?: Record<string, unknown>;
   [k: string]: unknown;
 }
 
@@ -50,6 +51,7 @@ export interface ToolResponse {
  */
 export interface ToolSuccessPayload {
   content: Array<{ type: string; text?: string; [k: string]: unknown }>;
+  structuredContent?: Record<string, unknown>;
   [k: string]: unknown;
 }
 

@@ -5,6 +5,7 @@ import type { HandlerResult, OperationParams, ToolDefinition } from '../mcp.type
 import { normalizeParameters } from '../utils/parameter-conversion.js';
 import { validatePath, validateSubPath, projectGodotPath } from '../utils/path-validation.js';
 import { createErrorResponse, getErrorMessage } from '../utils/error-response.js';
+import { createStructuredResponse } from '../utils/structured-response.js';
 import {
   parseProjectArgs,
   requireString,
@@ -576,7 +577,7 @@ export async function handleSearchProject(args: OperationParams): Promise<Handle
       caseSensitive,
       maxResults,
     );
-    return ok({ content: [{ type: 'text', text: JSON.stringify(result) }] });
+    return createStructuredResponse(result as unknown as Record<string, unknown>);
   } catch (error: unknown) {
     return err(
       createErrorResponse(`Failed to search project: ${getErrorMessage(error)}`, [
@@ -631,8 +632,9 @@ export async function handleGetSceneDependencies(args: OperationParams): Promise
         dependencies.push(dep);
       }
     }
-    return ok({
-      content: [{ type: 'text', text: JSON.stringify({ scene: scenePath.value, dependencies }) }],
+    return createStructuredResponse({
+      scene: scenePath.value,
+      dependencies,
     });
   } catch (error: unknown) {
     return err(

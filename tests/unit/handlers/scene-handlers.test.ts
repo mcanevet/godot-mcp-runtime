@@ -75,14 +75,17 @@ describe('handleCreateScene', () => {
   });
 
   it('returns parsed result on successful runner output', async () => {
-    const fake = createFakeRunner({ stdout: 'Scene created successfully at: scenes/x.tscn' });
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ success: true, scenePath: 'scenes/x.tscn' }),
+    });
     const result = await handleCreateScene(fake.asRunner, {
       projectPath: fixtureProjectPath,
       scenePath: 'scenes/x.tscn',
     });
     expect(hasError(result)).toBe(false);
-    const text = unwrap(result).content[0].text;
-    expect(text).toContain('created successfully');
+    const env = unwrap(result);
+    expect(env.structuredContent).toEqual({ success: true, scenePath: 'scenes/x.tscn' });
+    expect(JSON.parse(env.content[0].text)).toEqual(env.structuredContent);
   });
 });
 

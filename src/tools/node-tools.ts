@@ -348,6 +348,8 @@ export async function handleDeleteNodes(
     parsed.value.projectPath,
     'Failed to delete nodes',
     ['Check if the node paths are correct'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -377,6 +379,8 @@ export async function handleSetNodeProperties(
     parsed.value.projectPath,
     'Failed to set node properties',
     ['Check node paths and property names'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -443,6 +447,8 @@ export async function handleAttachScript(
     parsed.value.projectPath,
     'Failed to attach script',
     ['Ensure the script is valid for this node type'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -503,6 +509,8 @@ export async function handleDuplicateNode(
     parsed.value.projectPath,
     'Failed to duplicate node',
     ['Check if the node path and target parent path are correct'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -525,6 +533,8 @@ export async function handleGetNodeSignals(
     parsed.value.projectPath,
     'Failed to get node signals',
     ['Check if the node path is correct'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 

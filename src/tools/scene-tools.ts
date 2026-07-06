@@ -261,6 +261,8 @@ export async function handleCreateScene(
     parsed.value.projectPath,
     'Failed to create scene',
     ['Check if the root node type is valid'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }
 
@@ -454,5 +456,7 @@ export async function handleBatchSceneOperations(
     parsed.value.projectPath,
     'Batch scene operations failed',
     ['Check that all scene paths exist', 'Ensure node types are valid'],
+    undefined,
+    { parseStdoutAsJson: true },
   );
 }

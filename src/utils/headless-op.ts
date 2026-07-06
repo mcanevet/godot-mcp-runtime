@@ -1,6 +1,7 @@
 import type { GodotRunner } from './godot-runner.js';
 import type { HandlerResult, OperationParams } from '../mcp.types.js';
 import { createErrorResponse, extractGdError, getErrorMessage } from './error-response.js';
+import { createStructuredResponse } from './structured-response.js';
 import { ok, err } from './result.js';
 
 /**
@@ -21,6 +22,7 @@ export async function executeSceneOp(
   failurePrefix: string,
   emptyStdoutSolutions: string[],
   exceptionSolutions: string[] = ['Ensure Godot is installed correctly'],
+  options: { parseStdoutAsJson?: boolean } = {},
 ): Promise<HandlerResult> {
   try {
     const { stdout, stderr } = await runner.executeOperation(operation, params, projectPath);
@@ -28,6 +30,22 @@ export async function executeSceneOp(
       return err(
         createErrorResponse(`${failurePrefix}: ${extractGdError(stderr)}`, emptyStdoutSolutions),
       );
+    }
+    if (options.parseStdoutAsJson) {
+      try {
+        const payload = JSON.parse(stdout.trim()) as Record<string, unknown>;
+        return createStructuredResponse(payload);
+      } catch (parseErr) {
+        return err(
+          createErrorResponse(
+            `${failurePrefix}: GDScript returned invalid JSON (${getErrorMessage(parseErr)})`,
+            [
+              'This indicates a bug in godot_operations.gd — the operation should emit a JSON payload matching its outputSchema',
+              'Check get_debug_output for the raw stdout and stderr',
+            ],
+          ),
+        );
+      }
     }
     return ok({ content: [{ type: 'text', text: stdout }] });
   } catch (error: unknown) {
