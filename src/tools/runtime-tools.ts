@@ -37,7 +37,7 @@ import {
   type PolicyMatch,
 } from '../utils/run-script-policy.js';
 import { parseAutoloads } from '../utils/autoload-ini.js';
-import { extractSceneScripts, resolveLaunchScene } from '../utils/scene-parsing.js';
+import { collectSceneScriptsRecursive, resolveLaunchScene } from '../utils/scene-parsing.js';
 
 const SCREENSHOT_RESPONSE_MODES = ['full', 'preview', 'path_only'] as const;
 const DEFAULT_PREVIEW_MAX_WIDTH = 960;
@@ -728,10 +728,12 @@ export async function handleRunProject(
     }
   }
 
-  // Pre-flight security scan: autoloads + launched scene's top-level scripts.
-  // Result is a list of findings + a list of scan warnings (file-not-found,
-  // read errors, "no launchable scene"); both flow into the response warnings
-  // array. Strict mode + any Tier 1 finding → hard reject before launch.
+  // Pre-flight security scan: autoloads + the launched scene's scripts,
+  // scanning transitively into every PackedScene it instances (subscene
+  // recursion — see collectSceneScriptsRecursive). Result is a list of
+  // findings + a list of scan warnings (file-not-found, read errors,
+  // "no launchable scene"); both flow into the response warnings array.
+  // Strict mode + any Tier 1 finding → hard reject before launch.
   const scanWarnings: string[] = [];
   const scanFindings: Array<{ sourcePath: string; match: PolicyMatch }> = [];
   const absProjectPath = resolve(projectPath);
@@ -766,7 +768,7 @@ export async function handleRunProject(
         `Configured launch scene not found at ${launchScene}; scene-script scan skipped.`,
       );
     } else {
-      const scripts = extractSceneScripts(launchScene, absProjectPath);
+      const scripts = collectSceneScriptsRecursive(launchScene, absProjectPath);
       for (const filePath of scripts) {
         if (!isUnderDir(absProjectPath, filePath)) {
           scanWarnings.push(`Skipped scene script: "${filePath}" escapes project root.`);

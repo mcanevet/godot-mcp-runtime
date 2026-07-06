@@ -11,6 +11,7 @@ import {
   readMainSceneFromProject,
   resolveLaunchScene,
   extractSceneScripts,
+  collectSceneScriptsRecursive,
 } from '../../src/utils/scene-parsing.js';
 import { stripResPrefix } from '../../src/utils/path-validation.js';
 import { useTmpDirs } from '../helpers/tmp.js';
@@ -140,5 +141,114 @@ describe('extractSceneScripts', () => {
       '[ext_resource type="Script" path="res://scripts/bad.cs" id="1_aaa"]\n',
     );
     expect(extractSceneScripts(scenePath, dir)).toEqual([]);
+  });
+});
+
+describe('collectSceneScriptsRecursive', () => {
+  it("collects a child scene's script transitively through a PackedScene reference", () => {
+    const dir = tmp.makeProject('subscene-', 'config_version=5\n');
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts/parent.gd'), '');
+    writeFileSync(join(dir, 'scripts/child.gd'), '');
+
+    const childScenePath = join(dir, 'child.tscn');
+    writeFileSync(
+      childScenePath,
+      [
+        '[gd_scene format=3]',
+        '',
+        '[ext_resource type="Script" path="res://scripts/child.gd" id="1_ccc"]',
+        '',
+        '[node name="Child" type="Node2D"]',
+        '',
+      ].join('\n'),
+    );
+
+    const parentScenePath = join(dir, 'parent.tscn');
+    writeFileSync(
+      parentScenePath,
+      [
+        '[gd_scene format=3]',
+        '',
+        '[ext_resource type="Script" path="res://scripts/parent.gd" id="1_ppp"]',
+        '[ext_resource type="PackedScene" path="res://child.tscn" id="2_ccc"]',
+        '',
+        '[node name="Main" type="Node2D"]',
+        '',
+      ].join('\n'),
+    );
+
+    const result = collectSceneScriptsRecursive(parentScenePath, dir);
+    expect(result).toContain(join(dir, 'scripts/parent.gd'));
+    expect(result).toContain(join(dir, 'scripts/child.gd'));
+    expect(result).toHaveLength(2);
+  });
+
+  it('terminates and returns the union on a two-scene reference cycle', () => {
+    const dir = tmp.makeProject('subscene-cycle-', 'config_version=5\n');
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts/a.gd'), '');
+    writeFileSync(join(dir, 'scripts/b.gd'), '');
+
+    const sceneAPath = join(dir, 'a.tscn');
+    const sceneBPath = join(dir, 'b.tscn');
+
+    writeFileSync(
+      sceneAPath,
+      [
+        '[gd_scene format=3]',
+        '',
+        '[ext_resource type="Script" path="res://scripts/a.gd" id="1_aaa"]',
+        '[ext_resource type="PackedScene" path="res://b.tscn" id="2_bbb"]',
+        '',
+        '[node name="A" type="Node2D"]',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      sceneBPath,
+      [
+        '[gd_scene format=3]',
+        '',
+        '[ext_resource type="Script" path="res://scripts/b.gd" id="1_bbb"]',
+        '[ext_resource type="PackedScene" path="res://a.tscn" id="2_aaa"]',
+        '',
+        '[node name="B" type="Node2D"]',
+        '',
+      ].join('\n'),
+    );
+
+    const result = collectSceneScriptsRecursive(sceneAPath, dir);
+    expect(result.sort()).toEqual([join(dir, 'scripts/a.gd'), join(dir, 'scripts/b.gd')].sort());
+  });
+
+  it('skips a missing subscene reference silently instead of throwing', () => {
+    const dir = tmp.makeProject('subscene-missing-', 'config_version=5\n');
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts/parent.gd'), '');
+
+    const parentScenePath = join(dir, 'parent.tscn');
+    writeFileSync(
+      parentScenePath,
+      [
+        '[gd_scene format=3]',
+        '',
+        '[ext_resource type="Script" path="res://scripts/parent.gd" id="1_ppp"]',
+        '[ext_resource type="PackedScene" path="res://ghost.tscn" id="2_ggg"]',
+        '',
+        '[node name="Main" type="Node2D"]',
+        '',
+      ].join('\n'),
+    );
+
+    expect(() => collectSceneScriptsRecursive(parentScenePath, dir)).not.toThrow();
+    expect(collectSceneScriptsRecursive(parentScenePath, dir)).toEqual([
+      join(dir, 'scripts/parent.gd'),
+    ]);
+  });
+
+  it('returns [] when the root scene file is missing', () => {
+    const dir = tmp.makeProject('subscene-root-missing-', 'config_version=5\n');
+    expect(collectSceneScriptsRecursive(join(dir, 'missing.tscn'), dir)).toEqual([]);
   });
 });
