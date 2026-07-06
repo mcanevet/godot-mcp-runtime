@@ -291,7 +291,7 @@ export async function handleAddNode(
     'visible',
     'modulate',
   ] as const;
-  const mergedProps: OperationParams = properties.value ?? {};
+  const mergedProps: OperationParams = { ...(properties.value ?? {}) };
   for (const key of promotedKeys) {
     if (args[key] !== undefined) {
       mergedProps[key] = args[key];
