@@ -19,12 +19,19 @@ src/
     ├── godot-runner.ts          # Process spawning, runtime session, bridge TCP client
     ├── output-parsing.ts        # Godot stdout parsing (extractJson, cleanOutput, cleanStdout, normalizeForCompare)
     ├── path-validation.ts       # Path-shape validators (validatePath, validateSubPath, validateNodePath, isUnderDir, projectGodotPath, checkDisplayAvailable)
-    ├── error-response.ts        # Error helpers + arg validators (createErrorResponse, getErrorMessage, extractGdError, validateProjectArgs, validateSceneArgs)
+    ├── error-response.ts        # Error helpers (createErrorResponse, getErrorMessage, extractGdError) — argument validators live in arg-parsing.ts
+    ├── arg-parsing.ts           # Generic field helpers + parseProjectArgs/parseSceneArgs/parseNodePath, returning Result<T, ToolResponse>
+    ├── branded.ts               # Brand<T, Tag> nominal-type helper + ProjectPath/ScenePath/NodePath brands
+    ├── result.ts                # Result<T, E> shape + ok/err/isOk/isErr used across the handler/parser/dispatch boundary
     ├── parameter-conversion.ts  # camelCase ↔ snake_case parameter mapping
     ├── headless-op.ts           # executeSceneOp wrapper for headless-op handlers
     ├── bridge-manager.ts        # McpBridge artifact lifecycle (inject, cleanup, repair)
     ├── bridge-protocol.ts       # TCP framing (length-prefixed frames, port resolution)
     ├── autoload-ini.ts          # project.godot [autoload] INI primitives
+    ├── run-script-policy.ts     # Declarative Tier 1/2/3 rule table + evaluateScript() for run_script / run_project
+    ├── gdscript-scanner.ts      # Hand-written GDScript tokenizer backing the run_script security gate
+    ├── scene-parsing.ts         # .tscn / project.godot parsing for the run_project pre-flight scan (launch-scene resolution, ext_resource script extraction)
+    ├── mcp-context.ts           # Request-scoped context (elicitor, strict-mode flag, per-session state) threaded through tool dispatch
     └── logger.ts                # logDebug / logError helpers
 ```
 

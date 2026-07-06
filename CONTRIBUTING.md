@@ -82,11 +82,11 @@ Never document or implement batch as "accumulate and require explicit save."
 
 ### Path traversal protection
 
-All handlers validate paths through `validateProjectArgs` / `validateSceneArgs` from `src/utils/error-response.ts`. `validateProjectArgs` rejects `..` and verifies `project.godot` exists. `validateSceneArgs` additionally rejects absolute paths that escape the project root via `validateSubPath`. For scene-tree node paths (e.g. `root/Player`), use `validateNodePath` — it allows the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through the validators so the rules stay centralized.
+All handlers validate paths through `parseProjectArgs` / `parseSceneArgs` / `parseNodePath` from `src/utils/arg-parsing.ts`, each returning `Result<T, ToolResponse>`. `parseProjectArgs` rejects `..` and verifies `project.godot` exists. `parseSceneArgs` additionally rejects absolute paths that escape the project root via `validateSubPath`, and always requires `scenePath` to be present (pass `{ requireExists: false }` to opt out of the on-disk existence check, e.g. for `create_scene`). For scene-tree node paths (e.g. `root/Player`), use `parseNodePath` / `parseRequiredNodePath` / `parseOptionalNodePath` — they allow the relative-path style that `validateSubPath` rejects. Don't construct paths ad hoc with `path.join` — route through these parsers so the rules stay centralized.
 
-### Error responses use `createErrorResponse`
+### Error responses use `Result<HandlerResult, ToolResponse>`
 
-Tool handlers return `createErrorResponse(message, possibleSolutions[])`, not raw thrown errors. The MCP client expects the structured `{ content, isError: true }` shape and benefits from the `possibleSolutions` block.
+Tool handlers return `Result<HandlerResult, ToolResponse>`, not a raw `ToolResponse` and not a thrown error. The failure path is `return err(createErrorResponse(message, possibleSolutions[]))`; `createErrorResponse` builds the structured `{ content, isError: true }` shape the MCP client expects, with the `possibleSolutions` block appended. `src/dispatch.ts` unwraps the `Result` at the edge (`isOk(result) ? result.value : result.error`), so only the handler/parser layer needs to know about the `Result` wrapper.
 
 ### TypeScript camelCase, GDScript snake_case
 
@@ -119,9 +119,9 @@ The TS6385 strikethrough on the three `Server` references in `src/index.ts` is a
 1. Add a tool definition object to the `*ToolDefinitions` array in the appropriate `src/tools/*.ts` file. Each tool has its own `name`, `description`, and `inputSchema` containing only its relevant params.
 2. Create the handler function:
    - Normalize params with `normalizeParameters`
-   - Validate with `validateProjectArgs` or `validateSceneArgs`
+   - Validate with the `parse*` helpers from `src/utils/arg-parsing.ts` (`parseProjectArgs`, `parseSceneArgs`, `parseNodePath` and friends), which return branded `ProjectPath`/`ScenePath`/`NodePath` types (`src/utils/branded.ts`)
    - Call the runner
-   - Return the response (or `createErrorResponse` on failure)
+   - Return `ok(...)` on success or `err(createErrorResponse(...))` on failure (`src/utils/result.ts`)
 3. Export the handler and add an entry mapping the tool name to the handler in the `toolDispatch` table in `src/dispatch.ts`.
 4. If the tool needs GDScript: add the corresponding function in `src/scripts/godot_operations.gd` (snake_case params) and register the operation name in the `match` statement in `_init()`.
 5. Add a unit test for any pure helper logic; add an integration test if the tool touches scene files.
