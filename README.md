@@ -74,7 +74,7 @@ The Godot MCP space splits on two axes: whether a server can drive a _running_ g
 | GDAI MCP                  | Editor-mediated                                            | Committed editor addon               | Proprietary                    | $19                   |
 | Coding-Solo/godot-mcp     | No (launch + debug output)                                 | Zero (`npx`)                         | MIT                            | Free                  |
 
-Among servers with full live-game control, this is the only one with a zero-footprint install: no addon committed to version control, no custom engine, no account. It has shipped a runtime bridge since February 2026. For the full field of ten servers with a source for every claim, see [docs/comparison.md](docs/comparison.md).
+Among servers with full live-game control, godot-mcp-runtime pairs a zero-footprint install (no addon committed to version control, no custom engine, no account) with a single `npx` command, and it has shipped this transient-autoload runtime bridge since February 2026. One other project, [Vollkorn-Games/godot-mcp](https://github.com/Vollkorn-Games/godot-mcp), independently arrived at the same design at the same time and is the only other server in this niche; it's earlier-stage and installs from source rather than npm. For the full field of ~20 servers with a source for every claim, see [docs/comparison.md](docs/comparison.md).
 
 ## Quick Start
 
