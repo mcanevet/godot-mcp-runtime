@@ -3,6 +3,14 @@
  * gating. The rule catalogue here is the single auditable surface — see
  * `docs/security.md` for the rationale on each tier assignment.
  *
+ * This is a best-effort filter, not a sound one and not a sandbox: GDScript
+ * is Turing-complete and reflective, so no tokenizer-level rule table can be
+ * complete. It catches the obvious, unobfuscated dangerous primitive; it does
+ * not and cannot defend against an adversary who reads this file (it's open
+ * source) and constructs a script the rules don't happen to match. See
+ * `docs/security.md` "What this does NOT do" for the specific structural
+ * gaps (identifier aliasing/dataflow, inline sub_resource scripts, etc.).
+ *
  * Three tiers:
  *  - Tier 1 (hard_block): server refuses; bridge never sees the script.
  *  - Tier 2 (elicit_required): server asks client/user; strict mode promotes

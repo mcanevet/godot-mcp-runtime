@@ -2,9 +2,11 @@
 
 GDScript executed via `run_script` runs inside the live Godot process with full user privileges. `run_project` launches the configured main scene and all `[autoload]` scripts, which is equally arbitrary code. Treat both as user-level RCE primitives.
 
-This server's defense is a **three-tier static-analysis gate** that inspects GDScript before it reaches the bridge. The gate is the only real boundary — MCP client bypass-permissions modes (Claude Code `--dangerously-skip-permissions`, Cursor YOLO, etc.) auto-answer elicitation requests, so elicitation alone is a UX speed bump, not a hard boundary. Strict mode (`GODOT_MCP_STRICT=true`) exists so operators running unattended can opt into hard enforcement for everything elicitation would otherwise gate.
+**This is a best-effort accident guard, not a sandbox and not a security boundary.** It exists to catch the _obvious, unobfuscated_ dangerous primitive when it appears verbatim in a `run_script` payload, or in an autoload/scene script that `run_project` is about to launch — the "a non-programmer downloaded a malicious Godot project and ran it through the server" case. It does **not** defend against an adversary who knows the ruleset (the tool is open source), and it _cannot_ — GDScript is Turing-complete and reflective, and tokenizer-level static analysis of it is unsound by construction.
 
-The rule catalogue below is the auditable surface. Tier assignments were calibrated against nine real Godot projects under `D:/Godot/Projects` — `OS.execute` and family have zero hits in real game code; literal `load()` / `preload()` / `call()` appear in nearly every game script and were demoted to Tier 3 to avoid conditioning users to click "yes" reflexively.
+The defense has two parts: a **three-tier static-analysis gate** that inspects GDScript before it reaches the bridge, and a **per-session bridge auth token** on every bridge frame (see "Bridge authentication" below). Together: every bridge frame is authenticated with a per-session token and every `run_script` payload is scanned, but the scan is a best-effort filter with known holes, and neither the token nor the scan is a hard sandbox. MCP client bypass-permissions modes (Claude Code `--dangerously-skip-permissions`, Cursor YOLO, etc.) auto-answer elicitation requests, so elicitation alone is a UX speed bump, not a hard boundary. Strict mode (`GODOT_MCP_STRICT=true`) lets operators running unattended opt into hard-rejecting everything the filter would otherwise elicit — it raises the floor, it does not close the structural gaps listed under "What this does NOT do."
+
+The rule catalogue below is the auditable surface, and because it's auditable, anyone can read it and construct a bypass — that's accepted as inherent to a best-effort filter, not a bug we're hiding. Tier assignments were calibrated against nine real Godot projects under `D:/Godot/Projects` — `OS.execute` and family have zero hits in real game code; literal `load()` / `preload()` / `call()` appear in nearly every game script and were demoted to Tier 3 to avoid conditioning users to click "yes" reflexively.
 
 ---
 
@@ -63,7 +65,7 @@ The server rejects the call. The bridge never sees the script (or the project ne
 
 ### Non-literal indirection
 
-These primitives fire **only when the first argument is not a literal string**. A literal-path `load("res://main.tscn")` drops to Tier 3 (warn).
+These primitives fire when the call's **whole first argument** does not classify as a lone string literal — not just its first token. `load("res://" + evil_var)` is non-literal (the argument is a string concatenated with a variable) even though a string literal appears first; only a call whose first argument is a single bare string token, like `load("res://main.tscn")`, classifies as literal and drops to Tier 3 (warn).
 
 | Primitive                          | Rule ID                                         |
 | ---------------------------------- | ----------------------------------------------- |
@@ -109,6 +111,17 @@ The server pauses and sends an `elicitation/create` request to the client. User 
 | `IP.resolve_hostname`           | `tier2.net.IP.resolve_hostname`           |
 | `IP.resolve_hostname_addresses` | `tier2.net.IP.resolve_hostname_addresses` |
 
+### Generic non-literal dispatch (any receiver)
+
+The named-receiver rules above (`Object.call`, `OS.call`, `Engine.call`, `ClassDB.call`, `ProjectSettings.call`) only fire on those five singletons. `.call`/`.callv` with a non-literal method name on _any other receiver_ — `some_node.call(method_var)` — is still dynamic dispatch that bypasses static analysis, so it's flagged too, matched on the last segment of the member chain rather than a fixed prefix.
+
+| Primitive                           | Rule ID                          |
+| ----------------------------------- | -------------------------------- |
+| `<any receiver>.call(non_literal)`  | `tier2.generic.call.nonliteral`  |
+| `<any receiver>.callv(non_literal)` | `tier2.generic.callv.nonliteral` |
+
+This is Tier 2, not Tier 1: plenty of benign code calls `some_callable.call(...)`, and hard-blocking it would train reflexive elicitation approval. `Object.call(var)` (and the other four named receivers) still hard-blocks via the more specific Tier 1 rule — the generic rule only fires when none of the named rules already matched.
+
 ---
 
 ## Tier 3 — Warn
@@ -127,6 +140,21 @@ Literal `load`/`preload`/`call` are extremely common in real game scripts; gatin
 
 ---
 
+## Bridge authentication
+
+The McpBridge TCP listener (`127.0.0.1:<port>`) previously dispatched any well-formed frame from any local process that found the port — a `run_script` payload sent directly to the bridge would bypass the static-analysis gate entirely, since the gate runs on the Node side before a command is ever sent. Every request frame now carries a per-session token, and the bridge rejects any frame whose token doesn't match.
+
+**What this buys, stated honestly:** the token stops the _unauthenticated drive-by_ — a process that finds the open port and blasts commands without knowing the secret. It does **not** stop a same-user process that reads the token from the environment (`/proc/<pid>/environ` on Linux, `OpenProcess` on Windows) or from the injected bridge script on disk. That's an accepted limitation of a same-machine, same-user token, not a gap we're hiding.
+
+Token delivery differs by session mode, because the channel available differs:
+
+- **Spawned (`run_project`)** — Node controls the process, so the token travels via the `MCP_SESSION_TOKEN` environment variable. It is never baked into the on-disk script for spawned mode — the env var keeps the secret off disk, the stronger position on Windows (reading another process's environment needs a process handle; reading a file in the project directory does not).
+- **Attached (`attach_project`)** — Godot is launched by the user, so Node has no env-var channel into it. The token is baked into the injected `mcp_bridge.gd` copy at inject time instead, the same mechanism used to bake the listen port.
+
+A frame with no token, or the wrong token, gets `{"error": "Unauthorized: invalid or missing session token"}` and is never dispatched to a command handler. The bridge fails open only when no token is configured at all — the standalone script run outside the MCP server (manual debugging, `validate`).
+
+---
+
 ## Strict mode
 
 `GODOT_MCP_STRICT=true` is read once at process start. When enabled:
@@ -140,17 +168,19 @@ Default (`GODOT_MCP_STRICT` unset or `"false"`): existing behavior preserved on 
 
 ## `run_project` pre-flight
 
+**Stated plainly: in default mode, `run_project` blocks nothing.** The project launches — autoloads run with full privileges immediately — and the scan below only _warns_. Only strict mode blocks.
+
 `run_project` runs the same scanner over:
 
 1. Every `[autoload]` entry in `project.godot` whose path ends in `.gd`.
-2. Every `[ext_resource type="Script" path="res://…"]` attached to the launched scene. The launched scene is the explicit `scene` argument if provided, else `run/main_scene` from `[application]`, else null (no scene scan, autoload-only).
+2. Every `[ext_resource type="Script" path="res://…"]` attached to the launched scene, recursing transitively into every `[ext_resource type="PackedScene"]` it instances (cycle-safe). The launched scene is the explicit `scene` argument if provided, else `run/main_scene` from `[application]`, else null (no scene scan, autoload-only).
 
 Findings are aggregated and:
 
 - **Default mode**: surfaced as `warnings: string[]` on the success response. The project still launches.
 - **Strict mode**: any Tier 1 finding hard-rejects before launch.
 
-Subscene recursion (scanning scripts attached to PackedScenes referenced by the launched scene) is **out of scope for v1**. The autoload scan (always-on) covers the higher-leverage attack surface, since autoloads execute on every launch regardless of scene composition.
+Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release. Still not scanned: inline `[sub_resource type="GDScript"]` scripts embedded directly in a `.tscn`, and `[instance]` property overrides — see "What this does NOT do."
 
 ### Session-confirmation gate
 
@@ -199,10 +229,16 @@ Audit failure (disk full, permission denied) is logged via `logDebug` and never 
 
 ## What this does NOT do
 
-- No runtime sandbox. The gate is static-analysis only.
-- No GDScript AST parse. The tokenizer is line-oriented and does not track variable assignments.
-- No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch — mitigated by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
+This section exists because the doctrine at the top of this document demands it: a best-effort filter that hides its own holes is worse than one that documents them.
+
+- **No runtime sandbox.** The gate is static-analysis only. Bridge authentication is a per-session token, not process isolation.
+- **No GDScript AST parse.** The tokenizer is line-oriented and does not track variable assignments.
+- **Identifier aliasing / dataflow is invisible.** `var f = FileAccess; f.open(...)` — or any indirection through a local variable — defeats every chain-based rule, because the scanner is token-level, not a dataflow analysis. This is a structural limit of tokenizer-level matching, not something the next rule addition can close.
+- **Inline scene scripts and instance overrides are not scanned by `run_project`'s pre-flight.** `[sub_resource type="GDScript"]` embeds GDScript source directly inside a `.tscn`; `[instance]` property overrides can also carry code-bearing values. Neither is chased. (Subscene _ext_resource_ recursion — scripts attached to a referenced PackedScene — IS scanned as of this release; see "`run_project` pre-flight".)
+- **Bypassable by anyone who reads the open-source rule table and obfuscates.** This is the central, load-bearing limitation: the catalogue above is deliberately auditable, which means an adversary who wants to bypass it can read exactly what triggers each tier and construct GDScript that doesn't. That's accepted as inherent to a best-effort filter aimed at unobfuscated primitives, not a defect to be patched away.
+- **Bridge auth doesn't stop a same-user process.** The per-session token stops unauthenticated drive-by connections to the bridge port; it does not stop a process running as the same user that can read the token from the environment or the injected script on disk (see "Bridge authentication").
+- No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch — mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
 - No telemetry / centralized reporting of blocks.
 - No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT`.
-- No retroactive scanning of scripts already in the project — `run_project` scans autoloads + launched scene's top-level scripts only.
+- No retroactive scanning of scripts already in the project — `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
 - `attach_project` inherits whatever the externally launched Godot is doing. Scripts executed via `run_script` against an attached process still go through the gate.

@@ -22,6 +22,16 @@
  * Line continuation (`\` at end of line) is handled by treating the next line
  * as a continuation of the current logical line for member-chain coalescing
  * purposes.
+ *
+ * This tokenizer is a best-effort accident guard, not a sound static
+ * analysis — see `run-script-policy.ts` and `docs/security.md` for the full
+ * doctrine. One structural blind spot worth stating plainly here, since it's
+ * inherent to token-level scanning and not a gap the next feature closes:
+ * identifier aliasing / dataflow is invisible. `var f = OS; f.execute(...)`
+ * tokenizes as two unrelated identifiers — the tokenizer has no notion of
+ * "what does this variable refer to," so a rule keyed on `OS.execute` never
+ * fires. Do not mistake this for a TODO; closing it would require a dataflow
+ * analysis, which is out of scope for a hand-written tokenizer by design.
  */
 
 export type TokenKind =
