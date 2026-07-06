@@ -78,6 +78,15 @@ describe('handleDeleteNodes', () => {
     expectErrorMatching(result, /nodePath/i);
   });
 
+  it('rejects an empty-string nodePath entry', async () => {
+    const fake = createFakeRunner();
+    const result = await handleDeleteNodes(fake.asRunner, {
+      ...validBase,
+      nodePaths: [''],
+    });
+    expectErrorMatching(result, /nodePath/i);
+  });
+
   it('treats empty Godot output as a failed operation', async () => {
     const fake = createFakeRunner({ stdout: '' });
     const result = await handleDeleteNodes(fake.asRunner, {

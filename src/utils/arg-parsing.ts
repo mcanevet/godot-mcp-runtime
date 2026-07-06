@@ -251,31 +251,30 @@ export function parseProjectArgs(
 }
 
 /**
- * Parse and validate `projectPath` + `scenePath`. When `sceneRequired` is
- * true (default), the scene file must exist on disk. When false, an empty
- * `scenePath` is permitted and `scenePath` is returned as an empty string
- * branded as `ScenePath` for shape parity (the caller knows the scene-not-
- * required path means "no scene to load yet" — e.g. `create_scene`).
+ * Parse and validate `projectPath` + `scenePath`. Two independent concerns:
+ *
+ * - Presence: `scenePath` must always be provided (you must say *where* the
+ *   scene is or will be) — there is no opt-out.
+ * - Existence: when `requireExists` is true (default), the scene file must
+ *   already exist on disk. Pass `{ requireExists: false }` for operations
+ *   like `create_scene` that write a scene to a path that need not exist yet.
  */
 export function parseSceneArgs(
   args: OperationParams,
-  opts?: { sceneRequired?: boolean },
+  opts?: { requireExists?: boolean },
 ): Result<{ projectPath: ProjectPath; scenePath: ScenePath }, ToolResponse> {
   const project = parseProjectArgs(args);
   if (!project.ok) return project;
 
-  const sceneRequired = opts?.sceneRequired !== false;
+  const requireExists = opts?.requireExists !== false;
   const raw = args.scenePath;
 
   if (!raw) {
-    if (sceneRequired) {
-      return err(
-        createErrorResponse('scenePath is required', [
-          'Provide the scene file path relative to the project',
-        ]),
-      );
-    }
-    return ok({ projectPath: project.value.projectPath, scenePath: '' as ScenePath });
+    return err(
+      createErrorResponse('scenePath is required', [
+        'Provide the scene file path relative to the project',
+      ]),
+    );
   }
   if (typeof raw !== 'string') {
     return err(
@@ -291,7 +290,7 @@ export function parseSceneArgs(
       ]),
     );
   }
-  if (sceneRequired) {
+  if (requireExists) {
     const sceneFullPath = join(project.value.projectPath, raw);
     if (!existsSync(sceneFullPath)) {
       return err(

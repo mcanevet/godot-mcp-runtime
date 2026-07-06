@@ -9,6 +9,7 @@ import {
   parseSceneArgs,
   parseRequiredNodePath,
   parseOptionalNodePath,
+  parseNodePath,
   requireString,
   optionalString,
   requireStringArray,
@@ -328,19 +329,16 @@ export async function handleDeleteNodes(
   const parsed = parseSceneArgs(args);
   if (!parsed.ok) return parsed;
 
-  const nodePaths = requireStringArray(args, 'nodePaths');
-  if (!nodePaths.ok) return nodePaths;
-  for (const p of nodePaths.value) {
-    if (p.includes('..')) {
-      return err(
-        createErrorResponse('Invalid nodePath in nodePaths', [
-          'Provide a scene-tree path without ".." (e.g. "root/Player")',
-        ]),
-      );
-    }
+  const rawPaths = requireStringArray(args, 'nodePaths');
+  if (!rawPaths.ok) return rawPaths;
+  const nodePaths: NodePath[] = [];
+  for (let i = 0; i < rawPaths.value.length; i++) {
+    const p = parseNodePath(rawPaths.value[i]!, `nodePaths[${i}]`);
+    if (!p.ok) return p;
+    nodePaths.push(p.value);
   }
 
-  const params = { scenePath: parsed.value.scenePath, nodePaths: nodePaths.value };
+  const params = { scenePath: parsed.value.scenePath, nodePaths };
   return executeSceneOp(
     runner,
     'delete_nodes',

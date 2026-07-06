@@ -245,7 +245,7 @@ export async function handleCreateScene(
   args: OperationParams,
 ): Promise<HandlerResult> {
   args = normalizeParameters(args);
-  const parsed = parseSceneArgs(args, { sceneRequired: false });
+  const parsed = parseSceneArgs(args, { requireExists: false });
   if (!parsed.ok) return parsed;
   const rootNodeType = optionalString(args, 'rootNodeType');
   if (!rootNodeType.ok) return rootNodeType;

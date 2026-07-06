@@ -159,11 +159,11 @@ describe('parseSceneArgs', () => {
     );
   });
 
-  it('returns { projectPath, scenePath: "" } when sceneRequired:false and scenePath is absent', () => {
-    const result = parseSceneArgs({ projectPath: fixtureProjectPath }, { sceneRequired: false });
-    assert(result.ok);
-    expect(result.value.projectPath).toBe(fixtureProjectPath);
-    expect(result.value.scenePath).toBe('');
+  it('returns err when scenePath is absent even when requireExists:false (presence is always required)', () => {
+    expectErrorMatching(
+      parseSceneArgs({ projectPath: fixtureProjectPath }, { requireExists: false }),
+      /scenePath is required/,
+    );
   });
 
   it('returns ok shape for a valid project and scene', () => {
@@ -176,11 +176,11 @@ describe('parseSceneArgs', () => {
     expect(result.value.scenePath).toBe(fixtureScenePath);
   });
 
-  it('does not check scene existence when sceneRequired:false and scenePath is provided', () => {
-    // Only sceneRequired:true stat-checks the scene file
+  it('does not check scene existence when requireExists:false and scenePath is provided', () => {
+    // Only requireExists:true (the default) stat-checks the scene file
     const result = parseSceneArgs(
       { projectPath: fixtureProjectPath, scenePath: 'ghost.tscn' },
-      { sceneRequired: false },
+      { requireExists: false },
     );
     assert(result.ok);
     expect(result.value.scenePath).toBe('ghost.tscn');

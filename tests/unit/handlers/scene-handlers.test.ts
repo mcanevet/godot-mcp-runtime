@@ -46,6 +46,23 @@ describe('handleCreateScene', () => {
     expectErrorMatching(result, /not a valid godot project/i);
   });
 
+  it('rejects missing scenePath', async () => {
+    const fake = createFakeRunner();
+    const result = await handleCreateScene(fake.asRunner, { projectPath: fixtureProjectPath });
+    expectErrorMatching(result, /scenePath is required/i);
+  });
+
+  it('accepts a scenePath pointing at a not-yet-existing file', async () => {
+    const fake = createFakeRunner({
+      stdout: JSON.stringify({ success: true, scenePath: 'scenes/not-yet-created.tscn' }),
+    });
+    const result = await handleCreateScene(fake.asRunner, {
+      projectPath: fixtureProjectPath,
+      scenePath: 'scenes/not-yet-created.tscn',
+    });
+    expect(hasError(result)).toBe(false);
+  });
+
   it('treats empty Godot output as a failed operation', async () => {
     const fake = createFakeRunner({ stdout: '' });
     const result = await handleCreateScene(fake.asRunner, {
