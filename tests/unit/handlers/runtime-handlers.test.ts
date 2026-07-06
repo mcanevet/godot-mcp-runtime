@@ -684,9 +684,12 @@ describe('handleSimulateInput', () => {
     const fake = setupActive();
     expectErrorMatching(
       await handleSimulateInput(fake.asRunner, { actions: [] }),
-      /non-empty array/i,
+      /actions must be an array of at least 1 item/i,
     );
-    expectErrorMatching(await handleSimulateInput(fake.asRunner, {}), /non-empty array/i);
+    expectErrorMatching(
+      await handleSimulateInput(fake.asRunner, {}),
+      /actions must be an array of at least 1 item/i,
+    );
   });
 
   it('passes a 10s buffer timeout when there are no wait actions', async () => {

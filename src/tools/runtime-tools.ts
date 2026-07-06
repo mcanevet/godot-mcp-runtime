@@ -17,6 +17,8 @@ import {
   optionalString,
   optionalNumber,
   optionalBoolean,
+  requireString,
+  requireArray,
 } from '../utils/arg-parsing.js';
 import { ok, err, type Result } from '../utils/result.js';
 import { logDebug } from '../utils/logger.js';
@@ -1123,7 +1125,9 @@ export function handleGetDebugOutput(
     );
   }
 
-  const limit = typeof args.limit === 'number' ? args.limit : 200;
+  const limitResult = optionalNumber(args, 'limit');
+  if (!limitResult.ok) return limitResult;
+  const limit = limitResult.value ?? 200;
   const response: {
     output: string[];
     errors: string[];
@@ -1198,7 +1202,9 @@ export async function handleTakeScreenshot(
     return sessionError;
   }
 
-  const timeout = typeof args.timeout === 'number' ? args.timeout : 10000;
+  const timeoutResult = optionalNumber(args, 'timeout');
+  if (!timeoutResult.ok) return timeoutResult;
+  const timeout = timeoutResult.value ?? 10000;
   const responseMode = parseScreenshotResponseMode(args.responseMode);
   if (responseMode === null) {
     return err(
@@ -1360,25 +1366,19 @@ export async function handleSimulateInput(
     return sessionError;
   }
 
-  const actions = args.actions;
-  if (!Array.isArray(actions) || actions.length === 0) {
-    return err(
-      createErrorResponse('actions must be a non-empty array of input actions', [
-        'Provide at least one action object with a "type" field',
-      ]),
-    );
-  }
+  const actionsResult = requireArray(args, 'actions', { minLength: 1 });
+  if (!actionsResult.ok) return actionsResult;
+  const actions = actionsResult.value;
 
   // Calculate timeout: sum of all wait durations + 10s buffer
   let totalWaitMs = 0;
   for (const action of actions) {
-    if (
-      typeof action === 'object' &&
-      action !== null &&
-      action.type === 'wait' &&
-      typeof action.ms === 'number'
-    ) {
-      totalWaitMs += action.ms;
+    const rec = action as Record<string, unknown>;
+    if (typeof action === 'object' && action !== null && rec.type === 'wait') {
+      const ms = rec.ms;
+      if (typeof ms === 'number') {
+        totalWaitMs += ms;
+      }
     }
   }
   const timeoutMs = totalWaitMs + 10000;
@@ -1436,11 +1436,16 @@ export async function handleGetUiElements(
     return sessionError;
   }
 
-  const visibleOnly = args.visibleOnly !== false;
+  const visibleOnlyResult = optionalBoolean(args, 'visibleOnly');
+  if (!visibleOnlyResult.ok) return visibleOnlyResult;
+  const visibleOnly = visibleOnlyResult.value ?? true;
+
+  const filterResult = optionalString(args, 'filter');
+  if (!filterResult.ok) return filterResult;
 
   try {
     const cmdParams: Record<string, unknown> = { visible_only: visibleOnly };
-    if (args.filter) cmdParams.type_filter = args.filter;
+    if (filterResult.value) cmdParams.type_filter = filterResult.value;
     const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
       'get_ui_elements',
       cmdParams,
@@ -1490,14 +1495,9 @@ export async function handleRunScript(
     return sessionError;
   }
 
-  const script = args.script;
-  if (typeof script !== 'string' || script.trim() === '') {
-    return err(
-      createErrorResponse('script is required and must be a non-empty string', [
-        'Provide GDScript source code with extends RefCounted and func execute(scene_tree: SceneTree) -> Variant',
-      ]),
-    );
-  }
+  const scriptResult = requireString(args, 'script');
+  if (!scriptResult.ok) return scriptResult;
+  const script = scriptResult.value;
 
   if (!script.includes('func execute')) {
     return err(
@@ -1582,7 +1582,9 @@ export async function handleRunScript(
     writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
   }
 
-  const timeout = typeof args.timeout === 'number' ? args.timeout : 30000;
+  const timeoutResult = optionalNumber(args, 'timeout');
+  if (!timeoutResult.ok) return timeoutResult;
+  const timeout = timeoutResult.value ?? 30000;
 
   try {
     const { response: responseStr, runtimeErrors } = await runner.sendCommandWithErrors(
