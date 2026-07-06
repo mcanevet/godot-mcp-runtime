@@ -61,6 +61,11 @@ function makeContext(opts: { elicit?: Elicitor; strict?: boolean } = {}): McpCon
 
 const acceptingContext = makeContext;
 const declineElicitor: Elicitor = async () => ({ action: 'decline' });
+const cancelElicitor: Elicitor = async () => ({ action: 'cancel' });
+const confirmFalseElicitor: Elicitor = async () => ({
+  action: 'accept',
+  content: { confirm: false },
+});
 const throwingElicitor: Elicitor = async () => {
   throw new Error('Method not found');
 };
@@ -903,6 +908,23 @@ describe('handleRunScript', () => {
     // Filename is a numeric timestamp + UUID suffix to avoid collisions.
     expect(files[0]).toMatch(/^\d+-[0-9a-f-]+\.gd$/);
   });
+
+  // Asserts the raw Result shape directly (not via the `unwrap` helper, which
+  // tolerates both the Result wrapper and a raw ToolResponse and would mask a
+  // regression back to the pre-Result-pattern return type).
+  it('returns the Result<HandlerResult, ToolResponse> shape on success', async () => {
+    const dir = tmp.makeProject('run-script-result-shape-');
+    const fake = createRuntimeFake();
+    fake.setSession({
+      mode: 'spawned',
+      projectPath: dir,
+      process: makeRunningProcess(),
+    });
+    fake.setBridgeResponse(JSON.stringify({ success: true, result: 1 }), []);
+    const result = await handleRunScript(fake.asRunner, { script: VALID_SCRIPT });
+    expect(result).toHaveProperty('ok', true);
+    expect((result as { ok: true; value: { content: unknown } }).value).toHaveProperty('content');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -967,6 +989,30 @@ describe('handleRunScript security policy', () => {
       fake.asRunner,
       { script: TIER2_SCRIPT },
       makeContext({ elicit: declineElicitor }),
+    );
+    expectErrorMatching(result, /User declined.*HTTPRequest/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('rejects Tier 2 when elicitor returns cancel (anything but accept is denial)', async () => {
+    const dir = tmp.makeProject('run-script-tier2-cancel-');
+    const fake = activeFake(dir);
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: cancelElicitor }),
+    );
+    expectErrorMatching(result, /User declined.*HTTPRequest/);
+    expect(fake.bridgeCalls).toHaveLength(0);
+  });
+
+  it('rejects Tier 2 when accept carries content.confirm:false', async () => {
+    const dir = tmp.makeProject('run-script-tier2-confirmfalse-');
+    const fake = activeFake(dir);
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: confirmFalseElicitor }),
     );
     expectErrorMatching(result, /User declined.*HTTPRequest/);
     expect(fake.bridgeCalls).toHaveLength(0);
@@ -1151,6 +1197,32 @@ describe('handleRunProject security pre-flight', () => {
     expectErrorMatching(result, /User declined run_project/);
   });
 
+  it('session gate cancel blocks the launch (anything but accept is denial)', async () => {
+    const dir = tmp.makeProject('run-project-gate-cancel-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: cancelElicitor }),
+    );
+    expectErrorMatching(result, /User declined run_project/);
+  });
+
+  it('session gate blocks the launch when accept carries content.confirm:false', async () => {
+    const dir = tmp.makeProject('run-project-gate-confirmfalse-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: confirmFalseElicitor }),
+    );
+    expectErrorMatching(result, /User declined run_project/);
+  });
+
   it('strict mode refuses launch when elicitor throws (no silent fallback)', async () => {
     const dir = tmp.makeProject('run-project-strict-elicitor-throw-', 'config_version=5\n');
     const fake = createRuntimeFake();
@@ -1163,6 +1235,22 @@ describe('handleRunProject security pre-flight', () => {
     );
     expectErrorMatching(result, /Elicitation unavailable/);
     expectErrorMatching(result, /strict mode refuses to launch/);
+  });
+
+  it('non-strict mode auto-accepts and launches when elicitor throws, warning in the response', async () => {
+    const dir = tmp.makeProject('run-project-nonstrict-elicitor-throw-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: throwingElicitor, strict: false }),
+    );
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).toMatch(/Elicitation unavailable/);
+    expect(text).toMatch(/launching without explicit user confirmation/);
   });
 
   it('scans the launched scene resolved from run/main_scene', async () => {
