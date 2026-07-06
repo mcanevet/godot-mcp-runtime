@@ -116,6 +116,11 @@ export class GodotRunner {
   public activeProjectPath: string | null = null;
   public activeSessionMode: RuntimeSessionMode | null = null;
   public activeBridgePort: number | null = null;
+  // Per-session bridge auth token. Spawned sessions deliver this via the
+  // MCP_SESSION_TOKEN env var; attached sessions bake it into the injected
+  // script (see BridgeManager.inject). Attached to every outgoing frame in
+  // sendCommand so the bridge can reject unauthenticated drive-by commands.
+  private activeSessionToken: string | null = null;
 
   private socket: net.Socket | null = null;
   // Receive buffer kept as an array of chunks until at least one complete frame
@@ -453,6 +458,7 @@ export class GodotRunner {
     const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
     logDebug(`Running Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
     const sessionToken = randomBytes(16).toString('hex');
+    this.activeSessionToken = sessionToken;
     const spawnOptions: SpawnOptions = {
       stdio: 'pipe',
       env: {
@@ -536,7 +542,12 @@ export class GodotRunner {
 
     const port = bridgePort ?? (await findFreePort());
     this.activeBridgePort = port;
-    this.bridge.inject(projectPath, port);
+    // Attach has no env channel to a Godot process the user launched
+    // themselves, so the baked script copy is the only way to deliver the
+    // auth token.
+    const token = randomBytes(16).toString('hex');
+    this.activeSessionToken = token;
+    this.bridge.inject(projectPath, port, token);
     const portSource = bridgePort !== undefined ? 'explicit' : 'auto';
     logDebug(`Attaching to Godot project: ${projectPath} (bridge port ${port}, ${portSource})`);
     this.activeProjectPath = projectPath;
@@ -566,6 +577,7 @@ export class GodotRunner {
       this.activeProjectPath = null;
       this.activeSessionMode = null;
       this.activeBridgePort = null;
+      this.activeSessionToken = null;
       this.activeProcess = null;
       return {
         mode: 'attached',
@@ -623,6 +635,7 @@ export class GodotRunner {
     }
     this.activeSessionMode = null;
     this.activeBridgePort = null;
+    this.activeSessionToken = null;
 
     return result;
   }
@@ -797,7 +810,11 @@ export class GodotRunner {
           return;
         }
         try {
-          const payload = JSON.stringify({ command, ...params });
+          const payload = JSON.stringify({
+            command,
+            token: this.activeSessionToken ?? undefined,
+            ...params,
+          });
           this.socket.write(encodeFrame(payload));
         } catch (writeErr) {
           const message = writeErr instanceof Error ? writeErr.message : String(writeErr);

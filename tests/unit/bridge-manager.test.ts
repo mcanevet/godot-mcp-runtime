@@ -7,13 +7,20 @@ import { useTmpDirs } from '../helpers/tmp.js';
 const tmp = useTmpDirs();
 
 const BRIDGE_SOURCE_CONTENT =
-  '# fake mcp_bridge.gd source for testing\nextends Node\nconst PORT := 9900\n';
+  '# fake mcp_bridge.gd source for testing\nextends Node\nconst PORT := 9900\nconst SESSION_TOKEN_BAKED := ""\n';
 
 const TEST_PORT = 9900;
 const ALT_PORT = 23456;
 
-function bakedContent(port: number): string {
-  return BRIDGE_SOURCE_CONTENT.replace(/const PORT := \d+/, `const PORT := ${port}`);
+function bakedContent(port: number, token?: string): string {
+  let content = BRIDGE_SOURCE_CONTENT.replace(/const PORT := \d+/, `const PORT := ${port}`);
+  if (token !== undefined) {
+    content = content.replace(
+      /const SESSION_TOKEN_BAKED := "[^"]*"/,
+      `const SESSION_TOKEN_BAKED := "${token}"`,
+    );
+  }
+  return content;
 }
 
 /**
@@ -139,6 +146,42 @@ describe('BridgeManager.inject', () => {
     writeFileSync(bridgeSourcePath, '# no marker\nextends Node\n', 'utf8');
     const manager = new BridgeManager(bridgeSourcePath);
     expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/const PORT := <int>/);
+  });
+
+  it('throws if the template lacks the SESSION_TOKEN_BAKED marker', () => {
+    const projectPath = tmp.makeProject('mcp-bridge-bad-token-', 'config_version=5\n');
+    const sourceDir = tmp.make('mcp-bridge-bad-token-src-');
+    const bridgeSourcePath = join(sourceDir, 'mcp_bridge.gd');
+    writeFileSync(bridgeSourcePath, 'extends Node\nconst PORT := 9900\n', 'utf8');
+    const manager = new BridgeManager(bridgeSourcePath);
+    expect(() => manager.inject(projectPath, TEST_PORT)).toThrow(/SESSION_TOKEN_BAKED/);
+  });
+
+  it('leaves the default empty token when no bakedToken argument is passed', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT);
+
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    expect(readFileSync(destScript, 'utf8')).toContain('const SESSION_TOKEN_BAKED := ""');
+  });
+
+  it('bakes the supplied token into the destination script', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT, 'sekrit-token');
+
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    expect(readFileSync(destScript, 'utf8')).toBe(bakedContent(TEST_PORT, 'sekrit-token'));
+  });
+
+  it('rewrites the baked token when inject is called again with a different token', () => {
+    const { projectPath, manager } = setupProject();
+    manager.inject(projectPath, TEST_PORT, 'first-token');
+    manager.inject(projectPath, TEST_PORT, 'second-token');
+
+    const destScript = join(projectPath, 'mcp_bridge.gd');
+    const content = readFileSync(destScript, 'utf8');
+    expect(content).toContain('const SESSION_TOKEN_BAKED := "second-token"');
+    expect(content).not.toContain('first-token');
   });
 
   it('inserts McpBridge into an existing empty [autoload] section', () => {

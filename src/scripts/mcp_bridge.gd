@@ -11,6 +11,11 @@ extends Node
 # source-of-truth default that ships with the script so it remains runnable
 # standalone (e.g. validate, manual debugging).
 const PORT := 9900  # MCP_BRIDGE_PORT_BAKED
+# Session token is baked into this script at inject time by BridgeManager.inject
+# for attach-mode sessions (there is no env-var channel to a Godot process the
+# user launched themselves). Spawned sessions deliver the token via the
+# MCP_SESSION_TOKEN env var instead and leave this at its shipped default.
+const SESSION_TOKEN_BAKED := ""  # MCP_BRIDGE_TOKEN_BAKED
 const MAX_FRAME_BYTES := 16 * 1024 * 1024
 const FRAME_HEADER_BYTES := 4
 
@@ -29,6 +34,8 @@ var _shutting_down: bool = false  # One-shot: set true in shutdown(); never rese
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	session_token = OS.get_environment("MCP_SESSION_TOKEN")
+	if session_token == "":
+		session_token = SESSION_TOKEN_BAKED
 	tcp_server = TCPServer.new()
 	var err = tcp_server.listen(PORT, "127.0.0.1")
 	if err != OK:
@@ -135,6 +142,17 @@ func _dispatch_command(peer: PeerState, data: String) -> void:
 	if typeof(payload) != TYPE_DICTIONARY:
 		_send_response(peer, {"error": "Expected JSON object"})
 		return
+
+	# Best-effort accident guard, not a sandbox: this stops an unauthenticated
+	# local process from blasting commands at the bridge port. It does NOT stop
+	# a same-user process that reads the token from our environment or from the
+	# injected script on disk. Fail-open only when no token is configured at
+	# all (standalone script run outside the MCP server, e.g. manual debugging).
+	if session_token != "":
+		var provided = payload.get("token", "")
+		if typeof(provided) != TYPE_STRING or provided != session_token:
+			_send_response(peer, {"error": "Unauthorized: invalid or missing session token"})
+			return
 
 	var command = payload.get("command", "")
 	match command:

@@ -20,9 +20,11 @@ import { join } from 'path';
 import { cpSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
+import * as net from 'net';
 import { itGodot } from '../helpers/godot-skip.js';
 import { fixtureProjectPath } from '../helpers/fixture-paths.js';
 import { GodotRunner } from '../../src/utils/godot-runner.js';
+import { encodeFrame, parseFrames } from '../../src/utils/bridge-protocol.js';
 
 // Heuristic: bridge failures we treat as "no display server" (skip-worthy)
 // rather than real failures. Anything else means runProject or the bridge is
@@ -183,6 +185,67 @@ func execute(scene_tree: SceneTree) -> Variant:
       // would be lowercase 'i' (no shift). The fix maps KEY_A..KEY_Z + shift to
       // KEY_A..KEY_Z (uppercase), no-shift to lowercase.
       expect(readResp.result?.text).toBe('Hi');
+    },
+    60000,
+  );
+
+  itGodot(
+    'rejects a bridge frame with a wrong or missing session token',
+    async (ctx) => {
+      // Regression coverage for the bridge auth gate: sendCommand always
+      // attaches the correct token, so exercising the rejection path requires
+      // talking to the bridge over a raw socket that bypasses GodotRunner.
+      const id = randomBytes(6).toString('hex');
+      tmpProject = join(tmpdir(), `godot-mcp-runtime-auth-${id}`);
+      cpSync(fixtureProjectPath, tmpProject, { recursive: true });
+
+      await runner.runProject(tmpProject);
+      const bridgeResult = await runner.waitForBridge(20000);
+
+      if (!bridgeResult.ready) {
+        if (isHeadlessEnvironmentError(bridgeResult.error)) {
+          ctx.skip(`display server unavailable (${bridgeResult.error})`);
+        }
+        throw new Error(`Bridge failed to initialise: ${bridgeResult.error ?? 'unknown error'}`);
+      }
+
+      const port = runner.activeBridgePort;
+      expect(port).not.toBeNull();
+
+      const sendRawFrame = (payload: Record<string, unknown>): Promise<string> => {
+        return new Promise((resolve, reject) => {
+          const socket = net.createConnection({ port: port!, host: '127.0.0.1' }, () => {
+            socket.write(encodeFrame(JSON.stringify(payload)));
+          });
+          let rxBuffer = Buffer.alloc(0);
+          socket.on('data', (chunk: Buffer) => {
+            rxBuffer = Buffer.concat([rxBuffer, chunk]);
+            const { frames } = parseFrames(rxBuffer);
+            if (frames.length > 0) {
+              socket.destroy();
+              resolve(frames[0]!.toString('utf8'));
+            }
+          });
+          socket.on('error', reject);
+        });
+      };
+
+      const wrongTokenResp = JSON.parse(
+        await sendRawFrame({ command: 'ping', token: 'not-the-real-token' }),
+      ) as { error?: string };
+      expect(wrongTokenResp.error).toMatch(/Unauthorized/);
+
+      const missingTokenResp = JSON.parse(await sendRawFrame({ command: 'ping' })) as {
+        error?: string;
+      };
+      expect(missingTokenResp.error).toMatch(/Unauthorized/);
+
+      // Sanity check: the runner's own authenticated ping still succeeds
+      // against the same live bridge.
+      const okResp = JSON.parse(await runner.sendCommand('ping', {}, 5000)) as {
+        status?: string;
+      };
+      expect(okResp.status).toBe('pong');
     },
     60000,
   );

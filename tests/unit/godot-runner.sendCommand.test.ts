@@ -188,6 +188,23 @@ describe('GodotRunner.sendCommand (TCP)', () => {
     await expect(r.sendCommand('ping')).rejects.toBeInstanceOf(BridgeDisconnectedError);
     r.closeConnection();
   });
+
+  it('attaches the session token field to every outgoing frame when set', async () => {
+    (runner as unknown as { activeSessionToken: string }).activeSessionToken = 'sekrit-token';
+    const pending = runner.sendCommand('ping');
+    const received = await bridge.nextFrame();
+    expect(JSON.parse(received)).toEqual({ command: 'ping', token: 'sekrit-token' });
+    bridge.reply('{"status":"pong"}');
+    await pending;
+  });
+
+  it('omits the token field when no session token is active', async () => {
+    const pending = runner.sendCommand('ping');
+    const received = await bridge.nextFrame();
+    expect(JSON.parse(received)).not.toHaveProperty('token');
+    bridge.reply('{"status":"pong"}');
+    await pending;
+  });
 });
 
 describe('GodotRunner.sendCommandWithErrors reconnect (TCP)', () => {

@@ -11,6 +11,12 @@ const MCP_GITIGNORE_ENTRY = '.mcp/' as const;
 // `const PORT := <int>` — so inject() can rewrite the integer per project.
 const BAKED_PORT_REGEX = /const PORT := \d+/;
 
+// Matches the baked-session-token marker line — `const SESSION_TOKEN_BAKED :=
+// "..."` — so inject() can rewrite it per project for attach-mode sessions.
+// Spawned sessions deliver the token via MCP_SESSION_TOKEN instead and leave
+// this at its shipped `""` default.
+const BAKED_TOKEN_REGEX = /const SESSION_TOKEN_BAKED := "[^"]*"/;
+
 /**
  * Owns the McpBridge autoload artifact: the script copy in the target project,
  * the `[autoload]` entry in project.godot, the `.mcp/.gdignore` marker, and the
@@ -35,7 +41,15 @@ export class BridgeManager {
 
   constructor(private bridgeScriptPath: string) {}
 
-  inject(projectPath: string, port: number): void {
+  /**
+   * @param bakedToken Session token to bake into the on-disk script, for
+   *   attach-mode sessions where Node cannot set the env var on a Godot
+   *   process the user launched themselves. Spawned sessions deliver the
+   *   token via `MCP_SESSION_TOKEN` instead and should omit this so the
+   *   shipped `""` default is left in place (fail-open only when no token is
+   *   configured at all).
+   */
+  inject(projectPath: string, port: number, bakedToken?: string): void {
     // Always rewrite the destination — the per-project bridge script may
     // differ from the template by exactly the baked integer, so a size/mtime
     // shortcut no longer maps to "up-to-date." Bake the resolved port into
@@ -47,7 +61,15 @@ export class BridgeManager {
         `Bridge script template at ${this.bridgeScriptPath} is missing the 'const PORT := <int>' marker`,
       );
     }
-    const baked = template.replace(BAKED_PORT_REGEX, `const PORT := ${port}`);
+    if (!BAKED_TOKEN_REGEX.test(template)) {
+      throw new Error(
+        `Bridge script template at ${this.bridgeScriptPath} is missing the 'const SESSION_TOKEN_BAKED := "..."' marker`,
+      );
+    }
+    let baked = template.replace(BAKED_PORT_REGEX, `const PORT := ${port}`);
+    if (bakedToken !== undefined) {
+      baked = baked.replace(BAKED_TOKEN_REGEX, `const SESSION_TOKEN_BAKED := "${bakedToken}"`);
+    }
     const destScript = join(projectPath, BRIDGE_SCRIPT_FILENAME);
     writeFileSync(destScript, baked, 'utf8');
     this.lastInjectedPort.set(projectPath, port);

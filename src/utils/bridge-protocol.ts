@@ -7,6 +7,14 @@
  *
  * Frame: 4-byte big-endian length prefix + UTF-8 JSON payload.
  * Max frame size is 16 MiB; oversize frames are rejected on receive.
+ *
+ * Request frame contract (additive): every request JSON payload is
+ * `{ command: string, token?: string, ...params }`. `sendCommand` in
+ * `godot-runner.ts` attaches the per-session auth token; the bridge rejects
+ * any frame whose `token` doesn't match its configured session token (see
+ * `_dispatch_command` in `mcp_bridge.gd`). This is a best-effort accident
+ * guard against unauthenticated local processes finding the bridge port, not
+ * a hard security boundary — see `docs/security.md`.
  */
 
 import * as net from 'net';

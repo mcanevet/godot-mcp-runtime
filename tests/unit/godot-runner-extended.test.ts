@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { cleanOutput, normalizeForCompare } from '../../src/utils/output-parsing.js';
 import { parseProjectArgs, parseSceneArgs } from '../../src/utils/arg-parsing.js';
 import { checkDisplayAvailable } from '../../src/utils/path-validation.js';
@@ -312,5 +314,47 @@ describe('detectGodotPath', () => {
     const resolved = runner.getGodotPath();
     expect(resolved).not.toBeNull();
     expect(resolved).not.toMatch(/Program Files\\Godot\\Godot\.exe$/);
+  });
+});
+
+// ─── attachProject bridge auth token ────────────────────────────────────────
+
+describe('GodotRunner.attachProject bridge auth token', () => {
+  const tmp = useTmpDirs();
+
+  it('bakes a per-session token into the injected bridge script (attach has no env channel)', async () => {
+    const dir = tmp.makeProject('attach-token-');
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    await runner.attachProject(dir);
+
+    const bridgeScript = readFileSync(join(dir, 'mcp_bridge.gd'), 'utf8');
+    const match = bridgeScript.match(/const SESSION_TOKEN_BAKED := "([^"]*)"/);
+    expect(match).not.toBeNull();
+    const bakedToken = match?.[1] ?? '';
+    // 16 random bytes hex-encoded = 32 hex chars.
+    expect(bakedToken).toMatch(/^[0-9a-f]{32}$/);
+
+    // The runner's in-memory token matches what was baked, so sendCommand's
+    // frames authenticate against exactly this script.
+    expect((runner as unknown as { activeSessionToken: string | null }).activeSessionToken).toBe(
+      bakedToken,
+    );
+  });
+
+  it('bakes a different token on each attachProject call', async () => {
+    const dirA = tmp.makeProject('attach-token-a-');
+    const dirB = tmp.makeProject('attach-token-b-');
+    const runner = new GodotRunner({ godotPath: 'godot' });
+
+    await runner.attachProject(dirA);
+    const tokenA = (runner as unknown as { activeSessionToken: string | null }).activeSessionToken;
+
+    await runner.attachProject(dirB);
+    const tokenB = (runner as unknown as { activeSessionToken: string | null }).activeSessionToken;
+
+    expect(tokenA).not.toBeNull();
+    expect(tokenB).not.toBeNull();
+    expect(tokenA).not.toBe(tokenB);
   });
 });
