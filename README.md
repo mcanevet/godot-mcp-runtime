@@ -150,7 +150,32 @@ npm run build
 > [!TIP]
 > **Prefer pnpm?** All three install paths work with pnpm. Substitute `pnpm dlx godot-mcp-runtime` for `npx -y godot-mcp-runtime`, `pnpm add -g godot-mcp-runtime` for the global install, or `pnpm install && pnpm run build` for the source build. pnpm ships stronger defaults against npm supply-chain attacks; see [pnpm's supply chain security guide](https://pnpm.io/supply-chain-security).
 
-If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will auto-detect it. Set `"DEBUG": "true"` in `env` for verbose logging.
+If Godot is on your `PATH`, you can omit `GODOT_PATH` entirely. The server will auto-detect it.
+
+#### Optional environment variables
+
+All are set in the same `env` block as `GODOT_PATH`:
+
+| Variable                        | Effect                                                                                                                                                                                                                                                                            |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEBUG`                         | `"true"` enables verbose `[DEBUG]` logging.                                                                                                                                                                                                                                       |
+| `GODOT_MCP_DISABLE_ELICITATION` | `"true"` disables the confirmation prompts for `run_project` and `run_script`. Use this if your client cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). Fail-open: the action proceeds with a warning. Tier 1 security hard-blocks still apply. |
+| `GODOT_MCP_STRICT`              | `"true"` hard-rejects anything that would otherwise prompt, for unattended operation. Takes precedence over `GODOT_MCP_DISABLE_ELICITATION` when both are set.                                                                                                                    |
+
+```json
+{
+  "mcpServers": {
+    "godot": {
+      "command": "npx",
+      "args": ["-y", "godot-mcp-runtime"],
+      "env": {
+        "GODOT_PATH": "<path-to-godot-executable>",
+        "GODOT_MCP_DISABLE_ELICITATION": "true"
+      }
+    }
+  }
+}
+```
 
 > [!IMPORTANT]
 > **Windows path gotchas.** `GODOT_PATH` must point at the Godot executable itself, not its install folder. Backslashes in JSON must be escaped or replaced with forward slashes:
@@ -178,6 +203,8 @@ Ask your AI assistant to call `get_project_info`. If it returns a Godot version 
 `run_project` runs the same scan over `[autoload]` scripts and scripts attached to the launched scene before spawning Godot.
 
 Set `GODOT_MCP_STRICT=true` to promote every Tier 2 finding to a hard block — needed for unattended operation where MCP client bypass-permissions modes auto-accept elicitation. Off by default.
+
+Set `GODOT_MCP_DISABLE_ELICITATION=true` for clients that cannot display elicitation prompts (e.g. Claude Desktop, which auto-cancels them). It skips the confirmation prompts and proceeds (fail-open): `run_project` launches and Tier 2 `run_script` findings run with a warning. Tier 1 hard blocks are unaffected. Strict mode takes precedence when both are set. Off by default.
 
 Every `run_script` call writes a `.policy.json` sidecar next to the audit-trail `.gd` file in `.mcp/scripts/`. See [`docs/security.md`](docs/security.md) for the full rule catalogue.
 

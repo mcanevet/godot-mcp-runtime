@@ -70,9 +70,15 @@ function createContextFromServer(server: Server): McpContext {
       ? { action: result.action, content: result.content as Record<string, unknown> }
       : { action: result.action };
   };
+  const strictMode = process.env.GODOT_MCP_STRICT === 'true';
+  // Strict mode mandates explicit confirmation, so it overrides the
+  // disable-elicitation opt-out: when both are set, strict wins and disableElicitation
+  // resolves to false (the startup log surfaces the override).
+  const disableElicitation = process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && !strictMode;
   return {
     elicitor,
-    strictMode: process.env.GODOT_MCP_STRICT === 'true',
+    strictMode,
+    disableElicitation,
     sessionState: { runProjectConfirmed: new Set<string>() },
   };
 }
@@ -101,6 +107,15 @@ class GodotMcpServer {
     this.ctx = createContextFromServer(this.server);
     if (this.ctx.strictMode) {
       console.error('[SERVER] Strict mode enabled (GODOT_MCP_STRICT=true)');
+    }
+    if (process.env.GODOT_MCP_DISABLE_ELICITATION === 'true' && this.ctx.strictMode) {
+      console.error(
+        '[SERVER] GODOT_MCP_DISABLE_ELICITATION ignored: strict mode requires explicit confirmation',
+      );
+    } else if (this.ctx.disableElicitation) {
+      console.error(
+        '[SERVER] Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION=true); confirmation prompts auto-accepted',
+      );
     }
 
     this.setupToolHandlers();

@@ -492,13 +492,21 @@ function attachRuntimeWarnings(target: Record<string, unknown>, runtimeErrors: s
 }
 
 /**
- * Type used for the `decision` field of the audit sidecar. Adds two synthetic
- * values that `PolicyDecision.decision` never carries — `elicit_denied` and
- * `elicit_accepted` are derived from the elicitation outcome by the handler.
- * Keeping them distinct from `warn` preserves the confirmation event in the
- * audit trail.
+ * Type used for the `decision` field of the audit sidecar. Adds three synthetic
+ * values that `PolicyDecision.decision` never carries — `elicit_denied`,
+ * `elicit_accepted`, and `elicit_bypassed` are derived from the elicitation
+ * outcome by the handler. `elicit_bypassed` records a Tier 2 finding that ran
+ * without a prompt because elicitation was disabled (GODOT_MCP_DISABLE_ELICITATION),
+ * distinct from a user-confirmed `elicit_accepted`. Keeping them distinct from
+ * `warn` preserves the confirmation event in the audit trail.
  */
-type AuditDecision = 'hard_block' | 'elicit_denied' | 'elicit_accepted' | 'warn' | 'ok';
+type AuditDecision =
+  | 'hard_block'
+  | 'elicit_denied'
+  | 'elicit_accepted'
+  | 'elicit_bypassed'
+  | 'warn'
+  | 'ok';
 
 interface AuditSidecar {
   decision: AuditDecision;
@@ -812,45 +820,66 @@ export async function handleRunProject(
   // the same project (the user just attached/ran).
   const projectKey = normalizeProjectKey(absProjectPath);
   if (!ctx.sessionState.runProjectConfirmed.has(projectKey)) {
-    let elicitResult: ElicitorResult;
-    try {
-      elicitResult = await ctx.elicitor({
-        message:
-          'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?',
-        requestedSchema: {
-          type: 'object',
-          properties: {
-            confirm: { type: 'boolean', description: 'Allow run_project to launch the project' },
+    if (ctx.disableElicitation) {
+      // Elicitation disabled by the operator (GODOT_MCP_DISABLE_ELICITATION). Skip the
+      // blanket confirmation gate and launch with a recorded warning. The
+      // tiered scan above is the real security boundary; the gate is UX.
+      scanWarnings.push(
+        'Elicitation disabled (GODOT_MCP_DISABLE_ELICITATION); launching without user confirmation.',
+      );
+      ctx.sessionState.runProjectConfirmed.add(projectKey);
+    } else {
+      let elicitResult: ElicitorResult;
+      try {
+        elicitResult = await ctx.elicitor({
+          message:
+            'Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?',
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              confirm: { type: 'boolean', description: 'Allow run_project to launch the project' },
+            },
+            required: ['confirm'],
           },
-          required: ['confirm'],
-        },
-      });
-    } catch (error) {
-      const elicitMsg = `Elicitation unavailable (${getErrorMessage(error)})`;
-      if (ctx.strictMode) {
+        });
+      } catch (error) {
+        const elicitMsg = `Elicitation unavailable (${getErrorMessage(error)})`;
+        if (ctx.strictMode) {
+          return err(
+            createErrorResponse(
+              `${elicitMsg}; strict mode refuses to launch without explicit user confirmation.`,
+              [
+                'Unset GODOT_MCP_STRICT to launch without confirmation',
+                'Use an MCP client that supports elicitation',
+              ],
+            ),
+          );
+        }
+        // Elicitation unsupported — fall through with a recorded warning. The
+        // tiered scan above is the real security boundary; the gate is UX.
+        scanWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
+        elicitResult = { action: 'accept', content: { confirm: true } };
+      }
+      if (!isElicitAccepted(elicitResult)) {
+        // A `cancel` action means the client dismissed the prompt without an
+        // explicit choice. Some clients (e.g. Claude Desktop) auto-cancel
+        // elicitation without ever displaying it, so distinguish it from an
+        // explicit `decline` and point the user at the opt-out.
+        const cancelled = elicitResult.action === 'cancel';
         return err(
           createErrorResponse(
-            `${elicitMsg}; strict mode refuses to launch without explicit user confirmation.`,
+            cancelled
+              ? 'run_project confirmation was cancelled without an explicit choice. Some MCP clients (e.g. Claude Desktop) auto-cancel elicitation prompts instead of displaying them.'
+              : 'User declined run_project. The project was not launched.',
             [
-              'Unset GODOT_MCP_STRICT to launch without confirmation',
-              'Use an MCP client that supports elicitation',
+              'Retry run_project once you intend to launch the project',
+              'If your client cannot display confirmation prompts, set GODOT_MCP_DISABLE_ELICITATION=true to skip them',
             ],
           ),
         );
       }
-      // Elicitation unsupported — fall through with a recorded warning. The
-      // tiered scan above is the real security boundary; the gate is UX.
-      scanWarnings.push(`${elicitMsg}; launching without explicit user confirmation.`);
-      elicitResult = { action: 'accept', content: { confirm: true } };
+      ctx.sessionState.runProjectConfirmed.add(projectKey);
     }
-    if (!isElicitAccepted(elicitResult)) {
-      return err(
-        createErrorResponse('User declined run_project. The project was not launched.', [
-          'Retry run_project once you intend to launch the project',
-        ]),
-      );
-    }
-    ctx.sessionState.runProjectConfirmed.add(projectKey);
   }
 
   if (!runner.getGodotPath()) {
@@ -1525,61 +1554,73 @@ export async function handleRunScript(
 
   // Tier 2: elicit. Single prompt for the script — name the first finding +
   // `+N more` suffix. Decline / cancel / elicitation-unavailable all map to
-  // denial. The audit sidecar records the actual outcome.
+  // denial. The audit sidecar records the actual outcome. When elicitation is
+  // disabled (GODOT_MCP_DISABLE_ELICITATION), the finding proceeds unprompted and is
+  // audited as `elicit_bypassed`. Note: strict mode promotes Tier 2 to
+  // `hard_block` in `evaluateScript` above, so this branch is never reached
+  // under strict — there is no strict/disableElicitation conflict to resolve here.
   let warningsFromPolicy: string[] = [];
+  let elicitBypassed = false;
   if (policy.decision === 'elicit_required') {
-    let elicitResult: ElicitorResult;
-    try {
-      const head = summarizeMatch(policy.matches[0]!);
-      elicitResult = await ctx.elicitor({
-        message: `run_script wants to call ${head}.${formatMoreFindingsSuffix(policy.matches.length)} Proceed?`,
-        requestedSchema: {
-          type: 'object',
-          properties: {
-            confirm: { type: 'boolean', description: 'Allow the script to run' },
+    if (ctx.disableElicitation) {
+      elicitBypassed = true;
+      warningsFromPolicy = matchesToWarnings(policy.matches);
+    } else {
+      let elicitResult: ElicitorResult;
+      try {
+        const head = summarizeMatch(policy.matches[0]!);
+        elicitResult = await ctx.elicitor({
+          message: `run_script wants to call ${head}.${formatMoreFindingsSuffix(policy.matches.length)} Proceed?`,
+          requestedSchema: {
+            type: 'object',
+            properties: {
+              confirm: { type: 'boolean', description: 'Allow the script to run' },
+            },
+            required: ['confirm'],
           },
-          required: ['confirm'],
-        },
-      });
-    } catch (error) {
-      if (projectPath) {
-        writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+        });
+      } catch (error) {
+        if (projectPath) {
+          writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+        }
+        return err(
+          createErrorResponse(
+            `Elicitation unavailable: ${policy.matches[0]?.matchedText ?? 'Tier 2 primitive'} requires user confirmation but the client does not support elicitation. Cause: ${getErrorMessage(error)}`,
+            [
+              'Restructure the script to avoid the flagged primitive',
+              'Use an MCP client that supports the elicitation/create capability',
+            ],
+          ),
+        );
       }
-      return err(
-        createErrorResponse(
-          `Elicitation unavailable: ${policy.matches[0]?.matchedText ?? 'Tier 2 primitive'} requires user confirmation but the client does not support elicitation. Cause: ${getErrorMessage(error)}`,
-          [
-            'Restructure the script to avoid the flagged primitive',
-            'Use an MCP client that supports the elicitation/create capability',
-          ],
-        ),
-      );
-    }
 
-    if (!isElicitAccepted(elicitResult)) {
-      if (projectPath) {
-        writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+      if (!isElicitAccepted(elicitResult)) {
+        if (projectPath) {
+          writeAuditSidecar(projectPath, script, 'elicit_denied', policy, ctx.strictMode);
+        }
+        return err(
+          createErrorResponse(
+            `User declined: ${summarizeMatch(policy.matches[0]!)}. The script was not executed.`,
+            collectSolutions(policy.matches),
+          ),
+        );
       }
-      return err(
-        createErrorResponse(
-          `User declined: ${summarizeMatch(policy.matches[0]!)}. The script was not executed.`,
-          collectSolutions(policy.matches),
-        ),
-      );
+      // Accept proceeds — record warnings for the success payload.
+      warningsFromPolicy = matchesToWarnings(policy.matches);
     }
-    // Accept proceeds — record warnings for the success payload.
-    warningsFromPolicy = matchesToWarnings(policy.matches);
   } else if (policy.decision === 'warn') {
     warningsFromPolicy = matchesToWarnings(policy.matches);
   }
 
   // Audit successful / warn paths. Tier 2 accept lands here and is recorded
   // distinctly from a plain Tier 3 warn so the audit trail preserves the
-  // user-confirmation event.
+  // user-confirmation event. A Tier 2 finding that ran unprompted because
+  // elicitation was disabled is recorded as `elicit_bypassed`.
   if (projectPath) {
     let auditDecision: AuditDecision;
     if (policy.decision === 'ok') auditDecision = 'ok';
-    else if (policy.decision === 'elicit_required') auditDecision = 'elicit_accepted';
+    else if (policy.decision === 'elicit_required')
+      auditDecision = elicitBypassed ? 'elicit_bypassed' : 'elicit_accepted';
     else auditDecision = 'warn';
     writeAuditSidecar(projectPath, script, auditDecision, policy, ctx.strictMode);
   }

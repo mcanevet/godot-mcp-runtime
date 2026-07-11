@@ -47,7 +47,9 @@ import type { Elicitor, McpContext } from '../../../src/utils/mcp-context.js';
  * `() => ({ action: 'accept', content: { confirm: true } })`, which auto-accepts
  * both the run_project session gate and any Tier 2 run_script elicitation.
  */
-function makeContext(opts: { elicit?: Elicitor; strict?: boolean } = {}): McpContext {
+function makeContext(
+  opts: { elicit?: Elicitor; strict?: boolean; disableElicitation?: boolean } = {},
+): McpContext {
   const defaultElicit: Elicitor = async () => ({
     action: 'accept',
     content: { confirm: true },
@@ -55,6 +57,7 @@ function makeContext(opts: { elicit?: Elicitor; strict?: boolean } = {}): McpCon
   return {
     elicitor: opts.elicit ?? defaultElicit,
     strictMode: opts.strict === true,
+    disableElicitation: opts.disableElicitation === true,
     sessionState: { runProjectConfirmed: new Set<string>() },
   };
 }
@@ -1036,6 +1039,28 @@ describe('handleRunScript security policy', () => {
     expect(sidecar.decision).toBe('elicit_denied');
   });
 
+  it('proceeds on Tier 2 without eliciting when elicitation is disabled (GODOT_MCP_DISABLE_ELICITATION)', async () => {
+    const dir = tmp.makeProject('run-script-tier2-noelicit-');
+    const fake = activeFake(dir);
+    // declineElicitor would deny if consulted; disableElicitation must bypass it and run.
+    const result = await handleRunScript(
+      fake.asRunner,
+      { script: TIER2_SCRIPT },
+      makeContext({ elicit: declineElicitor, disableElicitation: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    expect(fake.bridgeCalls).toHaveLength(1);
+    const parsed = JSON.parse(unwrap(result).content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes('HTTPRequest'))).toBe(true);
+    // Sidecar records elicit_bypassed, distinct from a user-confirmed accept.
+    const scriptsDir = join(dir, '.mcp', 'scripts');
+    const sidecarFile = readdirSync(scriptsDir).find((f) => f.endsWith('.policy.json'));
+    expect(sidecarFile).toBeDefined();
+    const sidecar = JSON.parse(readFileSync(join(scriptsDir, sidecarFile!), 'utf8'));
+    expect(sidecar.decision).toBe('elicit_bypassed');
+    expect(sidecar.tier).toBe(2);
+  });
+
   it('denies Tier 2 when invoked with no ctx (default null context auto-declines)', async () => {
     const dir = tmp.makeProject('run-script-tier2-nullctx-');
     const fake = activeFake(dir);
@@ -1197,7 +1222,7 @@ describe('handleRunProject security pre-flight', () => {
     expectErrorMatching(result, /User declined run_project/);
   });
 
-  it('session gate cancel blocks the launch (anything but accept is denial)', async () => {
+  it('session gate cancel blocks the launch but reports a distinct message from decline', async () => {
     const dir = tmp.makeProject('run-project-gate-cancel-', 'config_version=5\n');
     const fake = createRuntimeFake();
     fake.setGodotPath('/usr/bin/godot');
@@ -1207,7 +1232,30 @@ describe('handleRunProject security pre-flight', () => {
       { projectPath: dir },
       makeContext({ elicit: cancelElicitor }),
     );
-    expectErrorMatching(result, /User declined run_project/);
+    // A `cancel` action is distinguished from an explicit `decline` and hints
+    // at the Claude Desktop auto-cancel parity gap plus the opt-out flag.
+    expectErrorMatching(result, /cancelled without an explicit choice/);
+    const rendered = unwrap(result)
+      .content.map((c: { text: string }) => c.text)
+      .join('\n');
+    expect(rendered).toMatch(/GODOT_MCP_DISABLE_ELICITATION/);
+  });
+
+  it('session gate is skipped when elicitation is disabled (GODOT_MCP_DISABLE_ELICITATION)', async () => {
+    const dir = tmp.makeProject('run-project-gate-noelicit-', 'config_version=5\n');
+    const fake = createRuntimeFake();
+    fake.setGodotPath('/usr/bin/godot');
+    fake.setBridgeReady(true);
+    // declineElicitor would block if consulted; disableElicitation must bypass it entirely.
+    const result = await handleRunProject(
+      fake.asRunner,
+      { projectPath: dir },
+      makeContext({ elicit: declineElicitor, disableElicitation: true }),
+    );
+    expect(hasError(result)).toBe(false);
+    const text = unwrap(result).content[0].text;
+    expect(text).toMatch(/Elicitation disabled \(GODOT_MCP_DISABLE_ELICITATION\)/);
+    expect(text).toMatch(/launching without user confirmation/);
   });
 
   it('session gate blocks the launch when accept carries content.confirm:false', async () => {

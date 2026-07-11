@@ -2,12 +2,13 @@
  * Request-scoped context threaded through tool dispatch.
  *
  * Carries the elicitor (used by `run_script` / `run_project` to pause for
- * user confirmation on Tier 2 findings), the global strict-mode flag, and
- * per-session state (currently the once-per-project gate for `run_project`).
+ * user confirmation on Tier 2 findings), the global strict-mode flag, the
+ * disable-elicitation flag, and per-session state (currently the
+ * once-per-project gate for `run_project`).
  *
- * The strict-mode flag is captured when the context is built (see
- * `createContextFromServer` in `src/index.ts`). Toggling `GODOT_MCP_STRICT`
- * after the server starts has no effect.
+ * The strict-mode and no-elicit flags are captured when the context is built
+ * (see `createContextFromServer` in `src/index.ts`). Toggling `GODOT_MCP_STRICT`
+ * or `GODOT_MCP_DISABLE_ELICITATION` after the server starts has no effect.
  */
 
 /**
@@ -47,6 +48,17 @@ export interface SessionState {
 export interface McpContext {
   elicitor: Elicitor;
   strictMode: boolean;
+  /**
+   * When true, the interactive confirmation prompts are skipped and treated as
+   * accepted (fail-open): `run_project` launches without its blanket gate, and
+   * Tier 2 `run_script` findings proceed with a warning instead of eliciting.
+   * Set from `GODOT_MCP_DISABLE_ELICITATION=true` for clients that cannot surface
+   * elicitation prompts (e.g. Claude Desktop, which auto-cancels them). This is
+   * resolved to `false` when strict mode is on (see `createContextFromServer`):
+   * strict mandates explicit confirmation, so it takes precedence. Tier 1
+   * hard-block primitives are unaffected — they never elicit and always block.
+   */
+  disableElicitation: boolean;
   sessionState: SessionState;
 }
 
@@ -69,6 +81,7 @@ export function createNullContext(overrides?: Partial<McpContext>): McpContext {
   return {
     elicitor: async () => ({ action: 'decline' }),
     strictMode: false,
+    disableElicitation: false,
     sessionState: {
       runProjectConfirmed: new Set<string>(),
     },

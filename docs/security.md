@@ -166,6 +166,22 @@ Default (`GODOT_MCP_STRICT` unset or `"false"`): existing behavior preserved on 
 
 ---
 
+## Disabling elicitation
+
+`GODOT_MCP_DISABLE_ELICITATION=true` is read once at process start. It is the escape hatch for clients that cannot surface elicitation prompts. Some MCP clients — notably Claude Desktop / the Cowork surface ([anthropics/claude-code#56243](https://github.com/anthropics/claude-code/issues/56243)) — advertise the elicitation capability but auto-answer every `elicitation/create` with `{"action":"cancel"}` within milliseconds, never displaying the prompt. Because the client _responds_ (rather than erroring), the server cannot fall back the way it does for a client that lacks the capability outright: the auto-cancel is read as a user denial, and `run_project` becomes impossible to use.
+
+When enabled, the interactive confirmation is skipped and treated as accepted (**fail-open**):
+
+- `run_project`'s session-confirmation gate is bypassed; the project launches with a `warnings` entry recording the bypass.
+- Tier 2 `run_script` findings proceed without a prompt, with the finding surfaced in `warnings` and audited as `elicit_bypassed`.
+- **Tier 1 hard-block primitives are unaffected** — they never elicit and always block. This flag only disables the "ask the user" prompts, not the static-analysis gate.
+
+**Strict mode takes precedence.** `GODOT_MCP_STRICT` mandates explicit confirmation, so when both are set, `GODOT_MCP_DISABLE_ELICITATION` is ignored (a startup log records the override). The three states form one axis: default = ask, `DISABLE_ELICITATION` = proceed unprompted, `STRICT` = hard-reject anything that would ask.
+
+Only enable this when you trust the project and the agent driving it — it removes the confirmation step, the same tradeoff as an MCP client's bypass-permissions mode.
+
+---
+
 ## `run_project` pre-flight
 
 **Stated plainly: in default mode, `run_project` blocks nothing.** The project launches — autoloads run with full privileges immediately — and the scan below only _warns_. Only strict mode blocks.
@@ -184,7 +200,7 @@ Subscene _ext_resource_ recursion (item 2 above) is in scope as of this release.
 
 ### Session-confirmation gate
 
-The first `run_project` call against a given `projectPath` in a session prompts one elicitation: "Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?" Subsequent calls in the same session against the same project skip.
+The first `run_project` call against a given `projectPath` in a session prompts one elicitation: "Launching a Godot project executes arbitrary code in its autoloads and main scene. Proceed?" Subsequent calls in the same session against the same project skip. A `cancel` response (client dismissed the prompt without a choice, or auto-cancelled it) is reported distinctly from an explicit `decline` and points the user at `GODOT_MCP_DISABLE_ELICITATION`. When that flag is set, this gate is skipped entirely (see "Disabling elicitation").
 
 ---
 
@@ -197,7 +213,7 @@ Every `run_script` call writes two files to `.mcp/scripts/`:
 
 ```json
 {
-  "decision": "hard_block" | "elicit_denied" | "elicit_accepted" | "warn" | "ok",
+  "decision": "hard_block" | "elicit_denied" | "elicit_accepted" | "elicit_bypassed" | "warn" | "ok",
   "tier": 1,
   "strict_mode": false,
   "promoted_by_strict": false,
@@ -218,6 +234,7 @@ Every `run_script` call writes two files to `.mcp/scripts/`:
 - `hard_block` — Tier 1 finding; script refused before reaching the bridge.
 - `elicit_denied` — Tier 2 finding; user declined the elicitation OR the client does not support elicitation.
 - `elicit_accepted` — Tier 2 finding; user accepted the elicitation. Script executed.
+- `elicit_bypassed` — Tier 2 finding; elicitation was disabled (`GODOT_MCP_DISABLE_ELICITATION`), so the finding ran unprompted. Script executed; the finding is in `warnings`.
 - `warn` — Tier 3 finding only (no Tier 1 or Tier 2). Script executed; warnings surfaced in the response.
 - `ok` — No findings. Script executed unconditionally.
 
@@ -239,6 +256,6 @@ This section exists because the doctrine at the top of this document demands it:
 - **Bridge auth doesn't stop a same-user process.** The per-session token stops unauthenticated drive-by connections to the bridge port; it does not stop a process running as the same user that can read the token from the environment or the injected script on disk (see "Bridge authentication").
 - No defense against scripts that pass the gate then construct dangerous patterns dynamically through means the tokenizer cannot catch — mitigated, not eliminated, by `Expression`, `Engine.get_singleton`, and non-literal dynamic dispatch all being Tier 1.
 - No telemetry / centralized reporting of blocks.
-- No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT`.
+- No per-project or per-user policy overrides beyond `GODOT_MCP_STRICT` and `GODOT_MCP_DISABLE_ELICITATION` (both process-global, read once at start).
 - No retroactive scanning of scripts already in the project — `run_project` scans autoloads + the launched scene's scripts (including subscenes reached via PackedScene) only.
 - `attach_project` inherits whatever the externally launched Godot is doing. Scripts executed via `run_script` against an attached process still go through the gate.
