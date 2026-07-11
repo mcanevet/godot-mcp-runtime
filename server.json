@@ -7,13 +7,13 @@
     "url": "https://github.com/Erodenn/godot-mcp-runtime",
     "source": "github"
   },
-  "version": "3.2.0",
+  "version": "3.2.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "godot-mcp-runtime",
-      "version": "3.2.0",
+      "version": "3.2.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -27,6 +27,16 @@
         {
           "name": "DEBUG",
           "description": "Enable verbose logging when set to 'true'.",
+          "isRequired": false
+        },
+        {
+          "name": "GODOT_MCP_DISABLE_ELICITATION",
+          "description": "Set to 'true' to disable run_project/run_script confirmation prompts (fail-open) for clients that cannot display elicitation, e.g. Claude Desktop. Tier 1 security hard-blocks still apply.",
+          "isRequired": false
+        },
+        {
+          "name": "GODOT_MCP_STRICT",
+          "description": "Set to 'true' to hard-reject anything that would otherwise prompt, for unattended operation. Takes precedence over GODOT_MCP_DISABLE_ELICITATION.",
           "isRequired": false
         }
       ]
