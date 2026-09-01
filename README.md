@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://modelcontextprotocol.io/introduction"><img src="https://badge.mcpx.dev?type=server" alt="MCP Server"></a>
   <a href="https://www.npmjs.com/package/godot-mcp-runtime"><img src="https://img.shields.io/npm/v/godot-mcp-runtime" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/godot-mcp-runtime"><img src="https://img.shields.io/npm/dt/godot-mcp-runtime" alt="npm downloads"></a>
+  <a href="https://www.npmjs.com/package/godot-mcp-runtime"><img src="https://img.shields.io/npm/dw/godot-mcp-runtime" alt="npm weekly downloads"></a>
   <a href="LICENSE"><img src="https://badgen.net/github/license/Erodenn/godot-mcp-runtime" alt="License: MIT"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/node/v/godot-mcp-runtime" alt="Node.js"></a>
 </p>
