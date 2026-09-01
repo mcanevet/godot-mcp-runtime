@@ -1,28 +1,41 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { resolve } from 'path';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 
-const spawnMock = vi.fn();
-const findFreePortMock = vi.fn(async () => 12345);
-const injectMock = vi.fn();
-const cleanupMock = vi.fn();
+const { MOCK_BRIDGE_PORT, spawnMock, findFreePortMock, injectMock, cleanupMock } = vi.hoisted(
+  () => {
+    const port = 12345;
+    return {
+      MOCK_BRIDGE_PORT: port,
+      spawnMock: vi.fn(),
+      findFreePortMock: vi.fn(async () => port),
+      injectMock: vi.fn(),
+      cleanupMock: vi.fn(),
+    };
+  },
+);
 
-vi.mock('child_process', () => ({ spawn: (...args: unknown[]) => spawnMock(...args) }));
-vi.mock('./bridge-protocol.js', async () => {
-  const actual = await vi.importActual('./bridge-protocol.js');
+// Specifiers resolve relative to THIS file, so they must name the same module
+// ids godot-runner.ts imports. A mismatch binds nothing, silently, and the real
+// implementation runs instead.
+vi.mock('child_process', async () => ({
+  ...(await vi.importActual('child_process')),
+  spawn: (...args: unknown[]) => spawnMock(...args),
+}));
+vi.mock('../../src/utils/bridge-protocol.js', async () => {
+  const actual = await vi.importActual('../../src/utils/bridge-protocol.js');
   return { ...actual, findFreePort: findFreePortMock };
 });
-vi.mock('./path-validation.js', async () => {
-  const actual = await vi.importActual('./path-validation.js');
+vi.mock('../../src/utils/path-validation.js', async () => {
+  const actual = await vi.importActual('../../src/utils/path-validation.js');
   return { ...actual, checkDisplayAvailable: () => true, validateSubPath: () => false };
 });
-vi.mock('./bridge-manager.js', () => ({
+vi.mock('../../src/utils/bridge-manager.js', () => ({
   BridgeManager: class {
     inject = injectMock;
     cleanup = cleanupMock;
-    getLastInjectedPort = () => 12345;
+    getLastInjectedPort = () => MOCK_BRIDGE_PORT;
   },
 }));
 
@@ -66,6 +79,8 @@ describe('runProject relative projectPath regression', () => {
       const spawnArgs = spawnMock.mock.calls[0] as unknown[];
       expect(spawnArgs[1]).toContain('--path');
       expect(spawnArgs[1]).toContain(resolve('.'));
+      expect(injectMock).toHaveBeenCalled();
+      expect(runner.activeBridgePort).toBe(MOCK_BRIDGE_PORT);
     } finally {
       process.chdir(cwdSave);
     }
@@ -77,5 +92,25 @@ describe('runProject relative projectPath regression', () => {
     expect(runner.activeProjectPath).toBe(resolve(projectDir));
     const spawnArgs = spawnMock.mock.calls[0] as unknown[];
     expect(spawnArgs[1]).toContain(resolve(projectDir));
+    expect(injectMock).toHaveBeenCalled();
+    expect(runner.activeBridgePort).toBe(MOCK_BRIDGE_PORT);
+  });
+
+  // CI runs the unit suite on ubuntu-latest with no xvfb, where the real
+  // checkDisplayAvailable() rejects the launch. Fake it so an unbound
+  // path-validation mock fails here instead of only in CI.
+  it('runs under headless-CI conditions (linux, no DISPLAY)', async () => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    vi.stubEnv('DISPLAY', undefined);
+    vi.stubEnv('WAYLAND_DISPLAY', undefined);
+    try {
+      const runner = new GodotRunner({ godotPath: process.execPath });
+      await expect(runner.runProject(projectDir, undefined, true)).resolves.toBeDefined();
+      expect(runner.activeProjectPath).toBe(resolve(projectDir));
+    } finally {
+      vi.unstubAllEnvs();
+      if (platformDescriptor) Object.defineProperty(process, 'platform', platformDescriptor);
+    }
   });
 });
