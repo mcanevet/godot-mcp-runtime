@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'url';
-import { join, dirname, normalize } from 'path';
+import { join, dirname, normalize, resolve } from 'path';
 import { existsSync } from 'fs';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
@@ -415,6 +415,12 @@ export class GodotRunner {
       );
     }
 
+    // Resolve relative paths (e.g. ".") to absolute against the server's cwd.
+    // The bridge reports an absolute project_path in its pong, so a relative
+    // expectedPath makes pollBridge's path guard fail immediately and mask
+    // the real reason as a generic bridge timeout.
+    projectPath = resolve(projectPath);
+
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       logDebug('Killing existing Godot process before starting a new one');
       this.closeConnection();
@@ -520,6 +526,9 @@ export class GodotRunner {
   }
 
   async attachProject(projectPath: string, bridgePort?: number): Promise<void> {
+    // Resolve relative paths for the same reason as runProject — pollBridge
+    // compares against the absolute path the bridge reports.
+    projectPath = resolve(projectPath);
     if (this.activeSessionMode === 'spawned' && this.activeProcess) {
       await this.stopProject();
     } else if (

@@ -945,6 +945,9 @@ export async function handleRunProject(
         : '';
       const lines = [
         `${racePrefix}Godot process started, but the MCP bridge did not respond within ${BRIDGE_WAIT_SPAWNED_TIMEOUT_MS / 1000} seconds.`,
+        // Surface the precise poll failure (token/path mismatch, abort reason)
+        // instead of burying it behind the generic timeout narrative.
+        ...(bridgeResult.error ? [`- Actual reason: ${bridgeResult.error}`] : []),
         '- The bridge listener never came up — likely an early _ready error or a stuck process holding the port',
         '- Session has been torn down; retry run_project to start a new one',
         errorTail,
