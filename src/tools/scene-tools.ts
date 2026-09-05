@@ -48,7 +48,7 @@ export const sceneToolDefinitions = [
   {
     name: 'add_node',
     description:
-      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}. parentNodePath defaults to the scene root. Returns a plain-text confirmation message naming the new node and type. Errors if nodeType is not a registered Godot class or parentNodePath does not exist.',
+      'Add a node to a Godot scene. Saves automatically. Common spatial properties (position, position3d, rotation, scale, visible, modulate) can be set as top-level params; for any other property, pass it under properties. Vector2/Vector3/Color values auto-convert from {x,y}/{x,y,z}/{r,g,b,a}; NodePath and StringName properties accept a plain string. Object-typed properties (Resource or Node) accept a res:// path (loaded and assigned) or null; any other plain value errors. parentNodePath defaults to the scene root. Returns a plain-text confirmation message naming the new node and type. Errors, and does not add the node, if nodeType is not a registered Godot class, parentNodePath does not exist, a property name in properties does not exist on the node, or a property value is invalid for its declared type.',
     inputSchema: {
       type: 'object',
       properties: {

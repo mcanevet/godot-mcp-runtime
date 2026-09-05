@@ -327,14 +327,15 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	new_node.name = op.node_name
 	if op.has("properties"):
 		for property in op.properties:
-			var coerced = _coerce_property_value(op.properties[property])
-			new_node.set(property, coerced)
-			# Same post-set validation as set_node_properties: surface
-			# type-incompatible assignments as an error instead of letting
-			# them silently drop.
-			var stored = new_node.get(property)
-			if typeof(coerced) != typeof(stored) or coerced != stored:
-				push_warning("add_node dropped invalid property '%s' (type mismatch)" % property)
+			if not (property in new_node):
+				var error_message = "Property '%s' does not exist on node of type '%s'" % [property, new_node.get_class()]
+				new_node.free()
+				return {"ok": false, "error": error_message}
+			var prepared = _prepare_property_value(new_node, property, op.properties[property])
+			if not prepared.ok:
+				new_node.free()
+				return {"ok": false, "error": prepared.error}
+			new_node.set(property, prepared.value)
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	return {"ok": true, "error": ""}
@@ -546,22 +547,11 @@ func set_node_properties(params: Dictionary) -> void:
 		elif not (update.property in node):
 			result["error"] = "Property '%s' does not exist on node of type '%s'" % [update.property, node.get_class()]
 		else:
-			var coerced = _coerce_property_value(update.value)
-			node.set(update.property, coerced)
-			# Validate the assignment actually took. A mismatch means the
-			# value's type is incompatible with the property (classic case:
-			# assigning a plain Dictionary to a Resource-typed property such
-			# as CollisionShape2D.shape). Previously this failed silently
-			# while reporting success.
-			var stored = node.get(update.property)
-			if typeof(coerced) != typeof(stored) or coerced != stored:
-				result["error"] = (
-					"Cannot set property '%s' on node of type '%s': value type "
-					% [update.property, node.get_class()]
-					+ "incompatible with the property type. Resource-typed "
-					+ "properties cannot be set via this tool."
-				)
+			var prepared = _prepare_property_value(node, update.property, update.value)
+			if not prepared.ok:
+				result["error"] = prepared.error
 			else:
+				node.set(update.property, prepared.value)
 				result["success"] = true
 				any_set = true
 		results.append(result)
@@ -901,6 +891,65 @@ func _coerce_property_value(value):
 			var a = value.a if value.has("a") else 1.0
 			return Color(value.r, value.g, value.b, a)
 	return value
+
+# Helper: find a property's full descriptor from get_property_list(), or null
+# if the node has no property by that name. Callers that only need the
+# Variant type should use _declared_property_type instead.
+func _find_property_descriptor(node: Object, property: String):
+	for p in node.get_property_list():
+		if p.name == property:
+			return p
+	return null
+
+# Helper: declared Variant type of a property, from the node's property list.
+# Returns TYPE_NIL when the property is not found.
+func _declared_property_type(node: Object, property: String) -> int:
+	var descriptor = _find_property_descriptor(node, property)
+	if descriptor == null:
+		return TYPE_NIL
+	return descriptor.type
+
+# Helper: coerce and validate a raw JSON value against a node's declared
+# property type before it is assigned via node.set(). Returns
+# {"ok": bool, "value": Variant, "error": String}.
+#
+# The only shape this rejects is a plain (non-Object) value assigned to an
+# Object-typed property (Resource or Node) -- Godot's JSON numbers are always
+# floats and Godot itself converts float->int and String->NodePath/StringName
+# on store, so those conversions are left to node.set() and are not treated
+# as failures here. A res:// string assigned to an Object-typed property is
+# auto-loaded, mirroring _apply_load_sprite. null is always passed through
+# untouched -- it is the legitimate way to clear a resource.
+func _prepare_property_value(node: Object, property: String, raw_value) -> Dictionary:
+	var coerced = _coerce_property_value(raw_value)
+	if coerced == null:
+		return {"ok": true, "value": coerced, "error": ""}
+	if _declared_property_type(node, property) != TYPE_OBJECT or typeof(coerced) == TYPE_OBJECT:
+		return {"ok": true, "value": coerced, "error": ""}
+
+	if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
+		var res = load(coerced)
+		if not res:
+			return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
+		if res.resource_path == "":
+			return {"ok": false, "value": null, "error": "Resource has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
+		var descriptor = _find_property_descriptor(node, property)
+		if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_RESOURCE_TYPE and descriptor.get("hint_string", "") != "":
+			var allowed_classes = descriptor.hint_string.split(",")
+			var matches_one = false
+			for allowed_class in allowed_classes:
+				if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
+					matches_one = true
+					break
+			if not matches_one:
+				return {"ok": false, "value": null, "error": "Loaded resource is a %s, but property '%s' expects %s" % [res.get_class(), property, descriptor.hint_string]}
+		return {"ok": true, "value": res, "error": ""}
+
+	return {
+		"ok": false,
+		"value": null,
+		"error": "Cannot set property '%s' on node of type '%s': it is Object-typed (Resource or Node) and cannot be assigned a plain value. Pass a res:// path to load a saved resource, or use run_script to construct and assign one." % [property, node.get_class()],
+	}
 
 # Helper: collect node properties into a serializable Dictionary. When
 # changed_only is true, compares each property against a default instance of
