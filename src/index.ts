@@ -11,6 +11,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { startProgressHeartbeat } from './utils/progress-heartbeat.js';
 
 import type { GodotServerConfig } from './utils/godot-runner.js';
 import { GodotRunner } from './utils/godot-runner.js';
@@ -144,13 +145,22 @@ class GodotMcpServer {
       tools: allToolDefinitions,
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const toolName = request.params.name;
       const args = request.params.arguments || {};
 
       console.error(`[SERVER] Handling tool request: ${toolName}`);
 
-      return await dispatchToolCall(this.runner, toolName, args, this.ctx);
+      // Heartbeat progress notifications for the lifetime of the call so
+      // clients that set `resetTimeoutOnProgress` (e.g. opencode) keep their
+      // request timeout alive across long tool executions (run_script sims,
+      // playtests) instead of failing at the SDK's 60s default.
+      const stopHeartbeat = startProgressHeartbeat(extra, request);
+      try {
+        return await dispatchToolCall(this.runner, toolName, args, this.ctx);
+      } finally {
+        stopHeartbeat();
+      }
     });
   }
 
