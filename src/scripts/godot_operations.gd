@@ -327,7 +327,14 @@ func _apply_add_node(scene_root: Node, op: Dictionary) -> Dictionary:
 	new_node.name = op.node_name
 	if op.has("properties"):
 		for property in op.properties:
-			new_node.set(property, _coerce_property_value(op.properties[property]))
+			var coerced = _coerce_property_value(op.properties[property])
+			new_node.set(property, coerced)
+			# Same post-set validation as set_node_properties: surface
+			# type-incompatible assignments as an error instead of letting
+			# them silently drop.
+			var stored = new_node.get(property)
+			if typeof(coerced) != typeof(stored) or coerced != stored:
+				push_warning("add_node dropped invalid property '%s' (type mismatch)" % property)
 	parent.add_child(new_node)
 	new_node.owner = scene_root
 	return {"ok": true, "error": ""}
@@ -539,9 +546,24 @@ func set_node_properties(params: Dictionary) -> void:
 		elif not (update.property in node):
 			result["error"] = "Property '%s' does not exist on node of type '%s'" % [update.property, node.get_class()]
 		else:
-			node.set(update.property, _coerce_property_value(update.value))
-			result["success"] = true
-			any_set = true
+			var coerced = _coerce_property_value(update.value)
+			node.set(update.property, coerced)
+			# Validate the assignment actually took. A mismatch means the
+			# value's type is incompatible with the property (classic case:
+			# assigning a plain Dictionary to a Resource-typed property such
+			# as CollisionShape2D.shape). Previously this failed silently
+			# while reporting success.
+			var stored = node.get(update.property)
+			if typeof(coerced) != typeof(stored) or coerced != stored:
+				result["error"] = (
+					"Cannot set property '%s' on node of type '%s': value type "
+					% [update.property, node.get_class()]
+					+ "incompatible with the property type. Resource-typed "
+					+ "properties cannot be set via this tool."
+				)
+			else:
+				result["success"] = true
+				any_set = true
 		results.append(result)
 		if abort_on_error and result.has("error"):
 			break
