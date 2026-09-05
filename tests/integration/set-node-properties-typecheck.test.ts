@@ -1,21 +1,25 @@
 /**
  * Regression tests for type-invalid property assignments (silent-success gap).
  *
- * Context: `_coerce_property_value` maps Vector/Color dicts but has no
- * dict→Resource path. Assigning such a value to a Resource-typed property
- * via `node.set()` either fails or stores a mismatched value — but the tool
- * previously reported `success: true`, so agents believed the write landed
- * (observed in MythicQuest runs: `properties={"shape": {"size": {...}}}`
- * on CollisionShape2D silently dropping).
+ * Context: `node.set()` casts the incoming value through the property's
+ * typed setter with no validity return -- a type-incompatible value doesn't
+ * fail, it silently stores the ZERO value for the declared type (e.g. a
+ * String or Dictionary on an int property stores 0, a String on a Vector2
+ * property stores (0, 0)) -- but the tool previously reported
+ * `success: true`, so agents believed the write landed (observed in
+ * MythicQuest runs: `properties={"shape": {"size": {...}}}` on
+ * CollisionShape2D silently dropping).
  *
  * The fix checks the node's *declared* property type up front (via
  * get_property_list()) rather than inferring failure from post-set()
- * equality — Godot's JSON numbers are always floats and Godot itself
- * converts float->int and String->NodePath/StringName on store, so a naive
- * equality check after set() rejects those legitimate conversions too. Only
- * a non-Object value assigned to an Object-typed property (Resource or
- * Node) is rejected; a `res://` string assigned to an Object-typed property
- * is auto-loaded instead.
+ * equality, against a declared-type compatibility table
+ * (`_PROPERTY_TYPE_COMPAT` in godot_operations.gd) that allows the
+ * legitimate widening conversions Godot performs on store -- float->int,
+ * String->NodePath/StringName, bool<->int/float, Vector2<->Vector2i,
+ * Vector3<->Vector3i, Array->Packed*Array -- while rejecting everything
+ * else. A non-Object value assigned to an Object-typed property (Resource
+ * or Node) is rejected outright; a `res://` string assigned to an
+ * Object-typed property is auto-loaded instead.
  *
  * Requires GODOT_PATH. Skipped in CI without it.
  */
@@ -323,6 +327,83 @@ describe('set_node_properties type validation (silent-success gap)', () => {
   );
 
   itGodot(
+    'errors when a String is assigned to an int property (z_index) and does not persist',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+      const originalTscn = readFileSync(scenePath, 'utf-8');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'z_index', value: 'abc' }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBeUndefined();
+      expect(parsed.results[0].error).toMatch(/int/i);
+      expect(parsed.results[0].error).toMatch(/String/);
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).toBe(originalTscn);
+    },
+    60000,
+  );
+
+  itGodot(
+    'errors when a String is assigned to a Vector2 property (position) and does not persist',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+      const originalTscn = readFileSync(scenePath, 'utf-8');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'position', value: 'abc' }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBeUndefined();
+      expect(parsed.results[0].error).toMatch(/cannot|expected|type/i);
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).toBe(originalTscn);
+    },
+    60000,
+  );
+
+  itGodot(
+    'still succeeds assigning a bool to an int property (z_index)',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+
+      const { stdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'z_index', value: true }],
+        },
+        tmpProject,
+        30000,
+      );
+
+      const parsed = JSON.parse(extractJson(stdout));
+      expect(parsed.results[0].success).toBe(true);
+      const sceneText = readFileSync(scenePath, 'utf-8');
+      expect(sceneText).toContain('z_index = 1');
+    },
+    60000,
+  );
+
+  itGodot(
     'errors when a res:// resource is the wrong type for the property',
     async () => {
       const tmpProject = tmpDirs[tmpDirs.length - 1];
@@ -435,6 +516,91 @@ describe('add_node type validation (silent-success gap)', () => {
       const tscnAfter = readFileSync(scenePath, 'utf-8');
       expect(tscnAfter).not.toMatch(/\[node name="UnknownProp"/);
       expect(tscnAfter).toBe(originalTscn);
+    },
+    60000,
+  );
+
+  itGodot(
+    'errors and does not add the node when a String is given for an int property (z_index)',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+      const scenePath = join(tmpProject, 'main.tscn');
+      const originalTscn = readFileSync(scenePath, 'utf-8');
+
+      let stdoutSeen = '';
+      let stderrSeen = '';
+      try {
+        const { stdout, stderr } = await runner.executeOperation(
+          'add_node',
+          {
+            scenePath: 'main.tscn',
+            nodeType: 'Node2D',
+            nodeName: 'BadZIndex',
+            properties: { z_index: 'abc' },
+          },
+          tmpProject,
+          30000,
+        );
+        stdoutSeen = stdout || '';
+        stderrSeen = stderr || '';
+      } catch (err) {
+        stderrSeen = err instanceof Error ? err.message : String(err);
+      }
+
+      expect(stdoutSeen).not.toContain('added successfully');
+      expect(stderrSeen.toLowerCase()).toMatch(/int/);
+      const tscnAfter = readFileSync(scenePath, 'utf-8');
+      expect(tscnAfter).not.toMatch(/\[node name="BadZIndex"/);
+      expect(tscnAfter).toBe(originalTscn);
+    },
+    60000,
+  );
+});
+
+describe('set_node_properties type validation against a scripted node', () => {
+  itGodot(
+    'errors when a String is assigned to a script-declared int property, succeeds for an untyped one',
+    async () => {
+      const tmpProject = tmpDirs[tmpDirs.length - 1];
+
+      writeFileSync(
+        join(tmpProject, 'typed.gd'),
+        'extends Node2D\n@export var speed: int = 1\nvar anything\n',
+        'utf-8',
+      );
+
+      const attachResult = await runner.executeOperation(
+        'attach_script',
+        { scenePath: 'main.tscn', nodePath: '.', scriptPath: 'typed.gd' },
+        tmpProject,
+        30000,
+      );
+      expect(JSON.parse(extractJson(attachResult.stdout)).success).toBe(true);
+
+      const { stdout: speedStdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'speed', value: 'fast' }],
+        },
+        tmpProject,
+        30000,
+      );
+      const speedResult = JSON.parse(extractJson(speedStdout));
+      expect(speedResult.results[0].success).toBeUndefined();
+      expect(speedResult.results[0].error).toMatch(/int/i);
+
+      const { stdout: anythingStdout } = await runner.executeOperation(
+        'set_node_properties',
+        {
+          scenePath: 'main.tscn',
+          updates: [{ nodePath: '.', property: 'anything', value: { a: 1 } }],
+        },
+        tmpProject,
+        30000,
+      );
+      const anythingResult = JSON.parse(extractJson(anythingStdout));
+      expect(anythingResult.results[0].success).toBe(true);
     },
     60000,
   );

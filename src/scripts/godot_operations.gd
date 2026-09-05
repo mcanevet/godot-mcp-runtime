@@ -909,47 +909,105 @@ func _declared_property_type(node: Object, property: String) -> int:
 		return TYPE_NIL
 	return descriptor.type
 
+# Declared-type compatibility table for _prepare_property_value. Keyed by the
+# declared Variant type (TYPE_* from get_property_list()), valued by the set
+# of raw-value Variant types accepted for that declared type. A declared type
+# with no entry here falls back to the default rule: typeof(coerced) == D
+# (exact match). TYPE_NIL (untyped Variant, or a property missing from the
+# node's property list) is handled before this table is consulted -- it
+# always accepts anything.
+const _PROPERTY_TYPE_COMPAT: Dictionary = {
+	TYPE_INT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
+	TYPE_FLOAT: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
+	TYPE_BOOL: [TYPE_INT, TYPE_FLOAT, TYPE_BOOL],
+	TYPE_STRING: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_STRING_NAME: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_NODE_PATH: [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH],
+	TYPE_VECTOR2: [TYPE_VECTOR2, TYPE_VECTOR2I],
+	TYPE_VECTOR2I: [TYPE_VECTOR2, TYPE_VECTOR2I],
+	TYPE_VECTOR3: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_VECTOR3I: [TYPE_VECTOR3, TYPE_VECTOR3I],
+	TYPE_COLOR: [TYPE_COLOR],
+	TYPE_DICTIONARY: [TYPE_DICTIONARY],
+	TYPE_PACKED_BYTE_ARRAY: [TYPE_ARRAY, TYPE_PACKED_BYTE_ARRAY],
+	TYPE_PACKED_INT32_ARRAY: [TYPE_ARRAY, TYPE_PACKED_INT32_ARRAY],
+	TYPE_PACKED_INT64_ARRAY: [TYPE_ARRAY, TYPE_PACKED_INT64_ARRAY],
+	TYPE_PACKED_FLOAT32_ARRAY: [TYPE_ARRAY, TYPE_PACKED_FLOAT32_ARRAY],
+	TYPE_PACKED_FLOAT64_ARRAY: [TYPE_ARRAY, TYPE_PACKED_FLOAT64_ARRAY],
+	TYPE_PACKED_STRING_ARRAY: [TYPE_ARRAY, TYPE_PACKED_STRING_ARRAY],
+	TYPE_PACKED_VECTOR2_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR2_ARRAY],
+	TYPE_PACKED_VECTOR3_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR3_ARRAY],
+	TYPE_PACKED_COLOR_ARRAY: [TYPE_ARRAY, TYPE_PACKED_COLOR_ARRAY],
+	TYPE_PACKED_VECTOR4_ARRAY: [TYPE_ARRAY, TYPE_PACKED_VECTOR4_ARRAY],
+}
+
 # Helper: coerce and validate a raw JSON value against a node's declared
 # property type before it is assigned via node.set(). Returns
 # {"ok": bool, "value": Variant, "error": String}.
 #
-# The only shape this rejects is a plain (non-Object) value assigned to an
-# Object-typed property (Resource or Node) -- Godot's JSON numbers are always
-# floats and Godot itself converts float->int and String->NodePath/StringName
-# on store, so those conversions are left to node.set() and are not treated
-# as failures here. A res:// string assigned to an Object-typed property is
-# auto-loaded, mirroring _apply_load_sprite. null is always passed through
+# node.set() casts the incoming value through the property's typed setter
+# with no validity return -- a type-incompatible value doesn't fail, it
+# silently stores the ZERO value for the declared type (e.g. a String on an
+# int property stores 0, a String on a Vector2 property stores (0, 0)).
+# This function catches that class of bug up front by checking the value's
+# type against the property's declared type (via get_property_list()) before
+# node.set() ever runs.
+#
+# Two branches get special handling instead of the generic type check:
+#   - Object-typed properties (Resource or Node): a plain value is rejected
+#     outright, except a res:// string, which is auto-loaded (mirroring
+#     _apply_load_sprite).
+#   - Dictionary-typed properties: coercion is skipped so a dict with an x/y
+#     or r/g/b key can still be stored as a plain Dictionary instead of being
+#     turned into a Vector2/Vector3/Color.
+# Every other declared type is checked against _PROPERTY_TYPE_COMPAT, which
+# allows the legitimate widening conversions Godot performs on store
+# (float->int, String->NodePath/StringName, bool<->int/float,
+# Vector2<->Vector2i, Vector3<->Vector3i, Array->Packed*Array) while
+# rejecting everything else. TYPE_NIL (untyped Variant, or a property not in
+# the node's property list) accepts anything. null is always passed through
 # untouched -- it is the legitimate way to clear a resource.
 func _prepare_property_value(node: Object, property: String, raw_value) -> Dictionary:
-	var coerced = _coerce_property_value(raw_value)
+	var declared = _declared_property_type(node, property)
+	var coerced = raw_value if declared == TYPE_DICTIONARY else _coerce_property_value(raw_value)
 	if coerced == null:
 		return {"ok": true, "value": coerced, "error": ""}
-	if _declared_property_type(node, property) != TYPE_OBJECT or typeof(coerced) == TYPE_OBJECT:
-		return {"ok": true, "value": coerced, "error": ""}
 
-	if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
-		var res = load(coerced)
-		if not res:
-			return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
-		if res.resource_path == "":
-			return {"ok": false, "value": null, "error": "Resource has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
-		var descriptor = _find_property_descriptor(node, property)
-		if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_RESOURCE_TYPE and descriptor.get("hint_string", "") != "":
-			var allowed_classes = descriptor.hint_string.split(",")
-			var matches_one = false
-			for allowed_class in allowed_classes:
-				if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
-					matches_one = true
-					break
-			if not matches_one:
-				return {"ok": false, "value": null, "error": "Loaded resource is a %s, but property '%s' expects %s" % [res.get_class(), property, descriptor.hint_string]}
-		return {"ok": true, "value": res, "error": ""}
+	if declared == TYPE_OBJECT and typeof(coerced) != TYPE_OBJECT:
+		if typeof(coerced) == TYPE_STRING and coerced.begins_with("res://"):
+			var res = load(coerced)
+			if not res:
+				return {"ok": false, "value": null, "error": "Failed to load resource: " + coerced}
+			if res.resource_path == "":
+				return {"ok": false, "value": null, "error": "Resource has no resource_path - likely not imported. Open project in Godot editor once, or run 'godot --headless --editor --quit' to import assets."}
+			var descriptor = _find_property_descriptor(node, property)
+			if descriptor != null and descriptor.get("hint") == PROPERTY_HINT_RESOURCE_TYPE and descriptor.get("hint_string", "") != "":
+				var allowed_classes = descriptor.hint_string.split(",")
+				var matches_one = false
+				for allowed_class in allowed_classes:
+					if ClassDB.is_parent_class(res.get_class(), allowed_class) or res.is_class(allowed_class):
+						matches_one = true
+						break
+				if not matches_one:
+					return {"ok": false, "value": null, "error": "Loaded resource is a %s, but property '%s' expects %s" % [res.get_class(), property, descriptor.hint_string]}
+			return {"ok": true, "value": res, "error": ""}
 
-	return {
-		"ok": false,
-		"value": null,
-		"error": "Cannot set property '%s' on node of type '%s': it is Object-typed (Resource or Node) and cannot be assigned a plain value. Pass a res:// path to load a saved resource, or use run_script to construct and assign one." % [property, node.get_class()],
-	}
+		return {
+			"ok": false,
+			"value": null,
+			"error": "Cannot set property '%s' on node of type '%s': it is Object-typed (Resource or Node) and cannot be assigned a plain value. Pass a res:// path to load a saved resource, or use run_script to construct and assign one." % [property, node.get_class()],
+		}
+
+	if declared != TYPE_NIL:
+		var accepted_types = _PROPERTY_TYPE_COMPAT.get(declared, [declared])
+		if not (typeof(coerced) in accepted_types):
+			return {
+				"ok": false,
+				"value": null,
+				"error": "Cannot set property '%s' on node of type '%s': expected %s, got %s" % [property, node.get_class(), type_string(declared), type_string(typeof(coerced))],
+			}
+
+	return {"ok": true, "value": coerced, "error": ""}
 
 # Helper: collect node properties into a serializable Dictionary. When
 # changed_only is true, compares each property against a default instance of
