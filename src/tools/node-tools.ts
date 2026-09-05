@@ -66,7 +66,7 @@ export const nodeToolDefinitions = [
   {
     name: 'set_node_properties',
     description:
-      'Set one or more node properties on a scene in a single Godot process. Always-array: pass a single-element updates array for one-off edits. Vector2 ({x,y}), Vector3 ({x,y,z}), and Color ({r,g,b,a}) auto-convert; primitives pass through. For other complex GDScript types (Resource, NodePath, etc.), use run_script. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error).',
+      'Set one or more node properties on a scene in a single Godot process. Always-array: pass a single-element updates array for one-off edits. Vector2 ({x,y}), Vector3 ({x,y,z}), and Color ({r,g,b,a}) auto-convert; primitives pass through. NodePath and StringName properties accept a plain string. Object-typed properties (Resource or Node, e.g. CollisionShape2D.shape) accept a res:// path (loaded and assigned; errors if the path does not exist or the resource is the wrong type) or null (clears the property); any other plain value errors instead of silently dropping. Construct other resources via run_script. abortOnError stops on first failure (default false continues). Saves once at the end. Returns: results[] with one entry per update in input order (success or error).',
     annotations: { idempotentHint: true },
     inputSchema: {
       type: 'object',
