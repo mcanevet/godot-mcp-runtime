@@ -7,7 +7,7 @@
  * String or Dictionary on an int property stores 0, a String on a Vector2
  * property stores (0, 0)) -- but the tool previously reported
  * `success: true`, so agents believed the write landed (observed in
- * MythicQuest runs: `properties={"shape": {"size": {...}}}` on
+ * Agent-driven scene builds: `properties={"shape": {"size": {...}}}` on
  * CollisionShape2D silently dropping).
  *
  * The fix checks the node's *declared* property type up front (via
@@ -85,7 +85,7 @@ describe('set_node_properties type validation (silent-success gap)', () => {
       );
 
       // Attempt to set the `shape` property (Shape2D, a Resource) to a bare
-      // dictionary — the classic silent-drop case from MythicQuest runs.
+      // dictionary — the classic silent-drop case from agent-driven builds.
       const { stdout } = await runner.executeOperation(
         'set_node_properties',
         {
