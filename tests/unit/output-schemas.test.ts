@@ -43,6 +43,7 @@ describe('outputSchema — expected coverage', () => {
     'attach_script',
     'batch_scene_operations',
     'check_health',
+    'click_ui_element',
     'create_scene',
     'delete_nodes',
     'detach_project',

@@ -1,6 +1,6 @@
 /**
  * Fakes for runtime-session handler tests (simulate_input, click_ui_element,
- * check_health, ...).
+ * check_health, get_ui_elements, ...).
  *
  * Unlike the generic fake-runner.ts (headless executeOperation), these model
  * the live-bridge command path: sendCommandWithErrors + the public session
@@ -25,11 +25,13 @@ export interface BridgeCall {
 export interface RuntimeFake {
   asRunner: GodotRunner;
   bridgeCalls: BridgeCall[];
+  /** Number of times stopProject() has been invoked. */
   stopCalls(): number;
   setSession(opts: {
     mode: RuntimeSessionMode | null;
     projectPath?: string | null;
     process?: Partial<GodotProcess> | null;
+    /** Shorthand: creates a process stub with the given hasExited flag. */
     hasExited?: boolean;
   }): void;
   setBridgeResponse(response: unknown, runtimeErrors?: string[]): void;
@@ -37,6 +39,7 @@ export interface RuntimeFake {
   setBridgeHook(hook: (() => void) | null): void;
 }
 
+/** Build a test context with the given elicitor behavior. Defaults to auto-accept. */
 export function makeContext(
   opts: {
     elicit?: Elicitor;
@@ -70,6 +73,7 @@ export function createRuntimeFake(): RuntimeFake {
     activeSessionMode: null as RuntimeSessionMode | null,
     activeProjectPath: null as string | null,
     activeProcess: null as GodotProcess | null,
+    hasEverAttached: false,
   };
 
   const runner = {
@@ -82,8 +86,11 @@ export function createRuntimeFake(): RuntimeFake {
     get activeProcess() {
       return state.activeProcess;
     },
-    detectGodotPath: async () => '/usr/local/bin/godot',
     getVersion: async () => '4.7.2.stable.official',
+    get hasEverAttached() {
+      return state.hasEverAttached;
+    },
+    detectGodotPath: async () => '/usr/local/bin/godot',
     sendCommandWithErrors: async (
       command: string,
       params: Record<string, unknown>,
